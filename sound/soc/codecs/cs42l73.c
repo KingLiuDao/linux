@@ -1208,7 +1208,7 @@ static int cs42l73_set_bias_level(struct snd_soc_codec *codec,
 		break;
 
 	case SND_SOC_BIAS_STANDBY:
-		if (codec->dapm.bias_level == SND_SOC_BIAS_OFF) {
+		if (snd_soc_codec_get_bias_level(codec) == SND_SOC_BIAS_OFF) {
 			regcache_cache_only(cs42l73->regmap, false);
 			regcache_sync(cs42l73->regmap);
 		}
@@ -1228,7 +1228,6 @@ static int cs42l73_set_bias_level(struct snd_soc_codec *codec,
 		snd_soc_update_bits(codec, CS42L73_DMMCC, CS42L73_MCLKDIS, 1);
 		break;
 	}
-	codec->dapm.bias_level = level;
 	return 0;
 }
 
@@ -1347,7 +1346,7 @@ static int cs42l73_probe(struct snd_soc_codec *codec)
 	return 0;
 }
 
-static struct snd_soc_codec_driver soc_codec_dev_cs42l73 = {
+static const struct snd_soc_codec_driver soc_codec_dev_cs42l73 = {
 	.probe = cs42l73_probe,
 	.set_bias_level = cs42l73_set_bias_level,
 	.suspend_bias_off = true,
@@ -1361,7 +1360,7 @@ static struct snd_soc_codec_driver soc_codec_dev_cs42l73 = {
 	.num_controls = ARRAY_SIZE(cs42l73_snd_controls),
 };
 
-static struct regmap_config cs42l73_regmap = {
+static const struct regmap_config cs42l73_regmap = {
 	.reg_bits = 8,
 	.val_bits = 8,
 

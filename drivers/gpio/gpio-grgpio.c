@@ -121,7 +121,7 @@ static int grgpio_to_irq(struct gpio_chip *gc, unsigned offset)
 {
 	struct grgpio_priv *priv = grgpio_gc_to_priv(gc);
 
-	if (offset > gc->ngpio)
+	if (offset >= gc->ngpio)
 		return -ENXIO;
 
 	if (priv->lirqs[offset].index < 0)
@@ -332,7 +332,7 @@ static void grgpio_irq_unmap(struct irq_domain *d, unsigned int irq)
 	spin_unlock_irqrestore(&priv->bgc.lock, flags);
 }
 
-static struct irq_domain_ops grgpio_irq_domain_ops = {
+static const struct irq_domain_ops grgpio_irq_domain_ops = {
 	.map	= grgpio_irq_map,
 	.unmap	= grgpio_irq_unmap,
 };

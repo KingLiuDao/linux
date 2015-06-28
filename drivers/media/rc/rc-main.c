@@ -746,7 +746,7 @@ void rc_close(struct rc_dev *rdev)
 	if (rdev) {
 		mutex_lock(&rdev->lock);
 
-		 if (!--rdev->users && rdev->close != NULL)
+		if (!--rdev->users && rdev->close != NULL)
 			rdev->close(rdev);
 
 		mutex_unlock(&rdev->lock);
@@ -865,6 +865,8 @@ static ssize_t show_protocols(struct device *device,
 	} else {
 		enabled = dev->enabled_wakeup_protocols;
 		allowed = dev->allowed_wakeup_protocols;
+		if (dev->encode_wakeup && !allowed)
+			allowed = ir_raw_get_encode_protocols();
 	}
 
 	mutex_unlock(&dev->lock);
@@ -1021,16 +1023,16 @@ static ssize_t store_protocols(struct device *device,
 		goto out;
 	}
 
-	if (new_protocols == old_protocols) {
-		rc = len;
-		goto out;
+	if (new_protocols != old_protocols) {
+		*current_protocols = new_protocols;
+		IR_dprintk(1, "Protocols changed to 0x%llx\n",
+			   (long long)new_protocols);
 	}
 
-	*current_protocols = new_protocols;
-	IR_dprintk(1, "Protocols changed to 0x%llx\n", (long long)new_protocols);
-
 	/*
-	 * If the protocol is changed the filter needs updating.
+	 * If a protocol change was attempted the filter may need updating, even
+	 * if the actual protocol mask hasn't changed (since the driver may have
+	 * cleared the filter).
 	 * Try setting the same filter with the new protocol (if any).
 	 * Fall back to clearing the filter.
 	 */
@@ -1406,13 +1408,16 @@ int rc_register_device(struct rc_dev *dev)
 		path ? path : "N/A");
 	kfree(path);
 
-	if (dev->driver_type == RC_DRIVER_IR_RAW) {
+	if (dev->driver_type == RC_DRIVER_IR_RAW || dev->encode_wakeup) {
 		/* Load raw decoders, if they aren't already */
 		if (!raw_init) {
 			IR_dprintk(1, "Loading raw decoders\n");
 			ir_raw_init();
 			raw_init = true;
 		}
+	}
+
+	if (dev->driver_type == RC_DRIVER_IR_RAW) {
 		/* calls ir_register_device so unlock mutex here*/
 		mutex_unlock(&dev->lock);
 		rc = ir_raw_event_register(dev);

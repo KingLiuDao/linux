@@ -289,7 +289,7 @@ static int mrf24j40_read_rx_buf(struct mrf24j40 *devrec,
 		goto out;
 
 	/* Range check the RX FIFO length, accounting for the one-byte
-	 * length field at the begining. */
+	 * length field at the beginning. */
 	if (rx_len > RX_FIFO_SIZE-1) {
 		dev_err(printdev(devrec), "Invalid length read from device. Performing short read.\n");
 		rx_len = RX_FIFO_SIZE-1;
@@ -323,7 +323,7 @@ static int mrf24j40_read_rx_buf(struct mrf24j40 *devrec,
 
 #ifdef DEBUG
 	print_hex_dump(KERN_DEBUG, "mrf24j40 rx: ",
-		DUMP_PREFIX_OFFSET, 16, 1, data, *len, 0);
+		       DUMP_PREFIX_OFFSET, 16, 1, data, *len, 0);
 	pr_debug("mrf24j40 rx: lqi: %02hhx rssi: %02hhx\n",
 		 lqi_rssi[0], lqi_rssi[1]);
 #endif
@@ -521,7 +521,7 @@ static int mrf24j40_filter(struct ieee802154_hw *hw,
 		 */
 
 		dev_dbg(printdev(devrec), "Set Pan Coord to %s\n",
-					filt->pan_coord ? "on" : "off");
+			filt->pan_coord ? "on" : "off");
 	}
 
 	return 0;
@@ -533,6 +533,7 @@ static int mrf24j40_handle_rx(struct mrf24j40 *devrec)
 	u8 lqi = 0;
 	u8 val;
 	int ret = 0;
+	int ret2;
 	struct sk_buff *skb;
 
 	/* Turn off reception of packets off the air. This prevents the
@@ -569,9 +570,9 @@ static int mrf24j40_handle_rx(struct mrf24j40 *devrec)
 
 out:
 	/* Turn back on reception of packets off the air. */
-	ret = read_short_reg(devrec, REG_BBREG1, &val);
-	if (ret)
-		return ret;
+	ret2 = read_short_reg(devrec, REG_BBREG1, &val);
+	if (ret2)
+		return ret2;
 	val &= ~0x4; /* Clear RXDECINV */
 	write_short_reg(devrec, REG_BBREG1, val);
 
@@ -750,9 +751,8 @@ static int mrf24j40_probe(struct spi_device *spi)
 
 	devrec->hw->priv = devrec;
 	devrec->hw->parent = &devrec->spi->dev;
-	devrec->hw->phy->channels_supported[0] = CHANNEL_MASK;
-	devrec->hw->flags = IEEE802154_HW_OMIT_CKSUM | IEEE802154_HW_AACK |
-			    IEEE802154_HW_AFILT;
+	devrec->hw->phy->supported.channels[0] = CHANNEL_MASK;
+	devrec->hw->flags = IEEE802154_HW_OMIT_CKSUM | IEEE802154_HW_AFILT;
 
 	dev_dbg(printdev(devrec), "registered mrf24j40\n");
 	ret = ieee802154_register_hw(devrec->hw);

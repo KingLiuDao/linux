@@ -31,6 +31,7 @@
 #include <linux/slab.h>
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
+#include <acpi/video.h>
 #include "../../firmware/dcdbas.h"
 
 #define BRIGHTNESS_TOKEN 0x7d
@@ -1514,9 +1515,6 @@ static ssize_t kbd_led_triggers_store(struct device *dev,
 	struct kbd_state new_state;
 	struct kbd_state state;
 	bool triggers_enabled = false;
-	bool als_enabled = false;
-	bool disable_als = false;
-	bool enable_als = false;
 	int trigger_bit = -1;
 	char trigger[21];
 	int i, ret;
@@ -1532,47 +1530,8 @@ static ssize_t kbd_led_triggers_store(struct device *dev,
 	if (ret)
 		return ret;
 
-	if (kbd_als_supported)
-		als_enabled = kbd_is_als_mode_bit(state.mode_bit);
-
 	if (kbd_triggers_supported)
 		triggers_enabled = kbd_is_trigger_mode_bit(state.mode_bit);
-
-	if (kbd_als_supported) {
-		if (strcmp(trigger, "+als") == 0) {
-			if (als_enabled)
-				return count;
-			enable_als = true;
-		} else if (strcmp(trigger, "-als") == 0) {
-			if (!als_enabled)
-				return count;
-			disable_als = true;
-		}
-	}
-
-	if (enable_als || disable_als) {
-		new_state = state;
-		if (enable_als) {
-			if (triggers_enabled)
-				new_state.mode_bit = KBD_MODE_BIT_TRIGGER_ALS;
-			else
-				new_state.mode_bit = KBD_MODE_BIT_ALS;
-		} else {
-			if (triggers_enabled) {
-				new_state.mode_bit = KBD_MODE_BIT_TRIGGER;
-				kbd_set_level(&new_state, kbd_previous_level);
-			} else {
-				new_state.mode_bit = KBD_MODE_BIT_ON;
-			}
-		}
-		if (!(kbd_info.modes & BIT(new_state.mode_bit)))
-			return -EINVAL;
-		ret = kbd_set_state_safe(&new_state, &state);
-		if (ret)
-			return ret;
-		kbd_previous_mode_bit = new_state.mode_bit;
-		return count;
-	}
 
 	if (kbd_triggers_supported) {
 		for (i = 0; i < ARRAY_SIZE(kbd_led_triggers); ++i) {
@@ -1609,17 +1568,10 @@ static ssize_t kbd_led_triggers_store(struct device *dev,
 		    new_state.triggers)
 			return -EINVAL;
 		if (new_state.triggers && !triggers_enabled) {
-			if (als_enabled)
-				new_state.mode_bit = KBD_MODE_BIT_TRIGGER_ALS;
-			else {
-				new_state.mode_bit = KBD_MODE_BIT_TRIGGER;
-				kbd_set_level(&new_state, kbd_previous_level);
-			}
+			new_state.mode_bit = KBD_MODE_BIT_TRIGGER;
+			kbd_set_level(&new_state, kbd_previous_level);
 		} else if (new_state.triggers == 0) {
-			if (als_enabled)
-				new_state.mode_bit = KBD_MODE_BIT_ALS;
-			else
-				kbd_set_level(&new_state, 0);
+			kbd_set_level(&new_state, 0);
 		}
 		if (!(kbd_info.modes & BIT(new_state.mode_bit)))
 			return -EINVAL;
@@ -1665,13 +1617,6 @@ static ssize_t kbd_led_triggers_show(struct device *dev,
 		}
 	}
 
-	if (kbd_als_supported) {
-		if (kbd_is_als_mode_bit(state.mode_bit))
-			len += sprintf(buf+len, "+als ");
-		else
-			len += sprintf(buf+len, "-als ");
-	}
-
 	if (len)
 		buf[len - 1] = '\n';
 
@@ -1681,9 +1626,78 @@ static ssize_t kbd_led_triggers_show(struct device *dev,
 static DEVICE_ATTR(start_triggers, S_IRUGO | S_IWUSR,
 		   kbd_led_triggers_show, kbd_led_triggers_store);
 
-static ssize_t kbd_led_als_store(struct device *dev,
-				 struct device_attribute *attr,
-				 const char *buf, size_t count)
+static ssize_t kbd_led_als_enabled_store(struct device *dev,
+					 struct device_attribute *attr,
+					 const char *buf, size_t count)
+{
+	struct kbd_state new_state;
+	struct kbd_state state;
+	bool triggers_enabled = false;
+	int enable;
+	int ret;
+
+	ret = kstrtoint(buf, 0, &enable);
+	if (ret)
+		return ret;
+
+	ret = kbd_get_state(&state);
+	if (ret)
+		return ret;
+
+	if (enable == kbd_is_als_mode_bit(state.mode_bit))
+		return count;
+
+	new_state = state;
+
+	if (kbd_triggers_supported)
+		triggers_enabled = kbd_is_trigger_mode_bit(state.mode_bit);
+
+	if (enable) {
+		if (triggers_enabled)
+			new_state.mode_bit = KBD_MODE_BIT_TRIGGER_ALS;
+		else
+			new_state.mode_bit = KBD_MODE_BIT_ALS;
+	} else {
+		if (triggers_enabled) {
+			new_state.mode_bit = KBD_MODE_BIT_TRIGGER;
+			kbd_set_level(&new_state, kbd_previous_level);
+		} else {
+			new_state.mode_bit = KBD_MODE_BIT_ON;
+		}
+	}
+	if (!(kbd_info.modes & BIT(new_state.mode_bit)))
+		return -EINVAL;
+
+	ret = kbd_set_state_safe(&new_state, &state);
+	if (ret)
+		return ret;
+	kbd_previous_mode_bit = new_state.mode_bit;
+
+	return count;
+}
+
+static ssize_t kbd_led_als_enabled_show(struct device *dev,
+					struct device_attribute *attr,
+					char *buf)
+{
+	struct kbd_state state;
+	bool enabled = false;
+	int ret;
+
+	ret = kbd_get_state(&state);
+	if (ret)
+		return ret;
+	enabled = kbd_is_als_mode_bit(state.mode_bit);
+
+	return sprintf(buf, "%d\n", enabled ? 1 : 0);
+}
+
+static DEVICE_ATTR(als_enabled, S_IRUGO | S_IWUSR,
+		   kbd_led_als_enabled_show, kbd_led_als_enabled_store);
+
+static ssize_t kbd_led_als_setting_store(struct device *dev,
+					 struct device_attribute *attr,
+					 const char *buf, size_t count)
 {
 	struct kbd_state state;
 	struct kbd_state new_state;
@@ -1708,8 +1722,9 @@ static ssize_t kbd_led_als_store(struct device *dev,
 	return count;
 }
 
-static ssize_t kbd_led_als_show(struct device *dev,
-				struct device_attribute *attr, char *buf)
+static ssize_t kbd_led_als_setting_show(struct device *dev,
+					struct device_attribute *attr,
+					char *buf)
 {
 	struct kbd_state state;
 	int ret;
@@ -1722,15 +1737,33 @@ static ssize_t kbd_led_als_show(struct device *dev,
 }
 
 static DEVICE_ATTR(als_setting, S_IRUGO | S_IWUSR,
-		   kbd_led_als_show, kbd_led_als_store);
+		   kbd_led_als_setting_show, kbd_led_als_setting_store);
 
 static struct attribute *kbd_led_attrs[] = {
 	&dev_attr_stop_timeout.attr,
 	&dev_attr_start_triggers.attr,
+	NULL,
+};
+
+static const struct attribute_group kbd_led_group = {
+	.attrs = kbd_led_attrs,
+};
+
+static struct attribute *kbd_led_als_attrs[] = {
+	&dev_attr_als_enabled.attr,
 	&dev_attr_als_setting.attr,
 	NULL,
 };
-ATTRIBUTE_GROUPS(kbd_led);
+
+static const struct attribute_group kbd_led_als_group = {
+	.attrs = kbd_led_als_attrs,
+};
+
+static const struct attribute_group *kbd_led_groups[] = {
+	&kbd_led_group,
+	&kbd_led_als_group,
+	NULL,
+};
 
 static enum led_brightness kbd_led_level_get(struct led_classdev *led_cdev)
 {
@@ -1804,6 +1837,8 @@ static int __init kbd_led_init(struct device *dev)
 	kbd_init();
 	if (!kbd_led_present)
 		return -ENODEV;
+	if (!kbd_als_supported)
+		kbd_led_groups[1] = NULL;
 	kbd_led.max_brightness = kbd_get_max_level();
 	if (!kbd_led.max_brightness) {
 		kbd_led.max_brightness = kbd_get_valid_token_counts();
@@ -1886,13 +1921,8 @@ static int __init dell_init(void)
 		debugfs_create_file("rfkill", 0444, dell_laptop_dir, NULL,
 				    &dell_debugfs_fops);
 
-#ifdef CONFIG_ACPI
-	/* In the event of an ACPI backlight being available, don't
-	 * register the platform controller.
-	 */
-	if (acpi_video_backlight_support())
+	if (acpi_video_get_backlight_type() != acpi_backlight_vendor)
 		return 0;
-#endif
 
 	get_buffer();
 	buffer->input[0] = find_token_location(BRIGHTNESS_TOKEN);

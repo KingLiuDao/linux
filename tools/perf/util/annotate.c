@@ -30,6 +30,8 @@ static int disasm_line__parse(char *line, char **namep, char **rawp);
 
 static void ins__delete(struct ins_operands *ops)
 {
+	if (ops == NULL)
+		return;
 	zfree(&ops->source.raw);
 	zfree(&ops->source.name);
 	zfree(&ops->target.raw);
@@ -177,14 +179,17 @@ static int lock__parse(struct ins_operands *ops)
 		goto out_free_ops;
 
 	ops->locked.ins = ins__find(name);
+	free(name);
+
 	if (ops->locked.ins == NULL)
 		goto out_free_ops;
 
 	if (!ops->locked.ins->ops)
 		return 0;
 
-	if (ops->locked.ins->ops->parse)
-		ops->locked.ins->ops->parse(ops->locked.ops);
+	if (ops->locked.ins->ops->parse &&
+	    ops->locked.ins->ops->parse(ops->locked.ops) < 0)
+		goto out_free_ops;
 
 	return 0;
 
@@ -208,6 +213,13 @@ static int lock__scnprintf(struct ins *ins, char *bf, size_t size,
 
 static void lock__delete(struct ins_operands *ops)
 {
+	struct ins *ins = ops->locked.ins;
+
+	if (ins && ins->ops->free)
+		ins->ops->free(ops->locked.ops);
+	else
+		ins__delete(ops->locked.ops);
+
 	zfree(&ops->locked.ops);
 	zfree(&ops->target.raw);
 	zfree(&ops->target.name);
@@ -229,7 +241,7 @@ static int mov__parse(struct ins_operands *ops)
 	*s = '\0';
 	ops->source.raw = strdup(ops->raw);
 	*s = ',';
-	
+
 	if (ops->source.raw == NULL)
 		return -1;
 
@@ -494,6 +506,17 @@ static int __symbol__inc_addr_samples(struct symbol *sym, struct map *map,
 	return 0;
 }
 
+static struct annotation *symbol__get_annotation(struct symbol *sym)
+{
+	struct annotation *notes = symbol__annotation(sym);
+
+	if (notes->src == NULL) {
+		if (symbol__alloc_hist(sym) < 0)
+			return NULL;
+	}
+	return notes;
+}
+
 static int symbol__inc_addr_samples(struct symbol *sym, struct map *map,
 				    int evidx, u64 addr)
 {
@@ -501,13 +524,9 @@ static int symbol__inc_addr_samples(struct symbol *sym, struct map *map,
 
 	if (sym == NULL)
 		return 0;
-
-	notes = symbol__annotation(sym);
-	if (notes->src == NULL) {
-		if (symbol__alloc_hist(sym) < 0)
-			return -ENOMEM;
-	}
-
+	notes = symbol__get_annotation(sym);
+	if (notes == NULL)
+		return -ENOMEM;
 	return __symbol__inc_addr_samples(sym, map, notes, evidx, addr);
 }
 
@@ -531,8 +550,8 @@ static void disasm_line__init_ins(struct disasm_line *dl)
 	if (!dl->ins->ops)
 		return;
 
-	if (dl->ins->ops->parse)
-		dl->ins->ops->parse(&dl->ops);
+	if (dl->ins->ops->parse && dl->ins->ops->parse(&dl->ops) < 0)
+		dl->ins = NULL;
 }
 
 static int disasm_line__parse(char *line, char **namep, char **rawp)
@@ -635,14 +654,15 @@ struct disasm_line *disasm__get_next_ip_line(struct list_head *head, struct disa
 }
 
 double disasm__calc_percent(struct annotation *notes, int evidx, s64 offset,
-			    s64 end, const char **path)
+			    s64 end, const char **path, u64 *nr_samples)
 {
 	struct source_line *src_line = notes->src->lines;
 	double percent = 0.0;
+	*nr_samples = 0;
 
 	if (src_line) {
 		size_t sizeof_src_line = sizeof(*src_line) +
-				sizeof(src_line->p) * (src_line->nr_pcnt - 1);
+				sizeof(src_line->samples) * (src_line->nr_pcnt - 1);
 
 		while (offset < end) {
 			src_line = (void *)notes->src->lines +
@@ -651,7 +671,8 @@ double disasm__calc_percent(struct annotation *notes, int evidx, s64 offset,
 			if (*path == NULL)
 				*path = src_line->path;
 
-			percent += src_line->p[evidx].percent;
+			percent += src_line->samples[evidx].percent;
+			*nr_samples += src_line->samples[evidx].nr;
 			offset++;
 		}
 	} else {
@@ -661,8 +682,10 @@ double disasm__calc_percent(struct annotation *notes, int evidx, s64 offset,
 		while (offset < end)
 			hits += h->addr[offset++];
 
-		if (h->sum)
+		if (h->sum) {
+			*nr_samples = hits;
 			percent = 100.0 * hits / h->sum;
+		}
 	}
 
 	return percent;
@@ -677,8 +700,10 @@ static int disasm_line__print(struct disasm_line *dl, struct symbol *sym, u64 st
 
 	if (dl->offset != -1) {
 		const char *path = NULL;
+		u64 nr_samples;
 		double percent, max_percent = 0.0;
 		double *ppercents = &percent;
+		u64 *psamples = &nr_samples;
 		int i, nr_percent = 1;
 		const char *color;
 		struct annotation *notes = symbol__annotation(sym);
@@ -691,8 +716,10 @@ static int disasm_line__print(struct disasm_line *dl, struct symbol *sym, u64 st
 		if (perf_evsel__is_group_event(evsel)) {
 			nr_percent = evsel->nr_members;
 			ppercents = calloc(nr_percent, sizeof(double));
-			if (ppercents == NULL)
+			psamples = calloc(nr_percent, sizeof(u64));
+			if (ppercents == NULL || psamples == NULL) {
 				return -1;
+			}
 		}
 
 		for (i = 0; i < nr_percent; i++) {
@@ -700,9 +727,10 @@ static int disasm_line__print(struct disasm_line *dl, struct symbol *sym, u64 st
 					notes->src->lines ? i : evsel->idx + i,
 					offset,
 					next ? next->offset : (s64) len,
-					&path);
+					&path, &nr_samples);
 
 			ppercents[i] = percent;
+			psamples[i] = nr_samples;
 			if (percent > max_percent)
 				max_percent = percent;
 		}
@@ -740,8 +768,14 @@ static int disasm_line__print(struct disasm_line *dl, struct symbol *sym, u64 st
 
 		for (i = 0; i < nr_percent; i++) {
 			percent = ppercents[i];
+			nr_samples = psamples[i];
 			color = get_percent_color(percent);
-			color_fprintf(stdout, color, " %7.2f", percent);
+
+			if (symbol_conf.show_total_period)
+				color_fprintf(stdout, color, " %7" PRIu64,
+					      nr_samples);
+			else
+				color_fprintf(stdout, color, " %7.2f", percent);
 		}
 
 		printf(" :	");
@@ -750,6 +784,9 @@ static int disasm_line__print(struct disasm_line *dl, struct symbol *sym, u64 st
 
 		if (ppercents != &percent)
 			free(ppercents);
+
+		if (psamples != &nr_samples)
+			free(psamples);
 
 	} else if (max_lines && printed >= max_lines)
 		return 1;
@@ -998,6 +1035,32 @@ fallback:
 			}
 			filename = symfs_filename;
 		}
+	} else if (dso__needs_decompress(dso)) {
+		char tmp[PATH_MAX];
+		struct kmod_path m;
+		int fd;
+		bool ret;
+
+		if (kmod_path__parse_ext(&m, symfs_filename))
+			goto out_free_filename;
+
+		snprintf(tmp, PATH_MAX, "/tmp/perf-kmod-XXXXXX");
+
+		fd = mkstemp(tmp);
+		if (fd < 0) {
+			free(m.ext);
+			goto out_free_filename;
+		}
+
+		ret = decompress_to_file(m.ext, symfs_filename, fd);
+
+		free(m.ext);
+		close(fd);
+
+		if (!ret)
+			goto out_free_filename;
+
+		strcpy(symfs_filename, tmp);
 	}
 
 	snprintf(command, sizeof(command),
@@ -1017,7 +1080,7 @@ fallback:
 
 	file = popen(command, "r");
 	if (!file)
-		goto out_free_filename;
+		goto out_remove_tmp;
 
 	while (!feof(file))
 		if (symbol__parse_objdump_line(sym, map, file, privsize,
@@ -1032,6 +1095,10 @@ fallback:
 		delete_last_nop(sym);
 
 	pclose(file);
+
+out_remove_tmp:
+	if (dso__needs_decompress(dso))
+		unlink(symfs_filename);
 out_free_filename:
 	if (delete_extract)
 		kcore_extract__delete(&kce);
@@ -1054,7 +1121,7 @@ static void insert_source_line(struct rb_root *root, struct source_line *src_lin
 		ret = strcmp(iter->path, src_line->path);
 		if (ret == 0) {
 			for (i = 0; i < src_line->nr_pcnt; i++)
-				iter->p[i].percent_sum += src_line->p[i].percent;
+				iter->samples[i].percent_sum += src_line->samples[i].percent;
 			return;
 		}
 
@@ -1065,7 +1132,7 @@ static void insert_source_line(struct rb_root *root, struct source_line *src_lin
 	}
 
 	for (i = 0; i < src_line->nr_pcnt; i++)
-		src_line->p[i].percent_sum = src_line->p[i].percent;
+		src_line->samples[i].percent_sum = src_line->samples[i].percent;
 
 	rb_link_node(&src_line->node, parent, p);
 	rb_insert_color(&src_line->node, root);
@@ -1076,9 +1143,9 @@ static int cmp_source_line(struct source_line *a, struct source_line *b)
 	int i;
 
 	for (i = 0; i < a->nr_pcnt; i++) {
-		if (a->p[i].percent_sum == b->p[i].percent_sum)
+		if (a->samples[i].percent_sum == b->samples[i].percent_sum)
 			continue;
-		return a->p[i].percent_sum > b->p[i].percent_sum;
+		return a->samples[i].percent_sum > b->samples[i].percent_sum;
 	}
 
 	return 0;
@@ -1130,7 +1197,7 @@ static void symbol__free_source_line(struct symbol *sym, int len)
 	int i;
 
 	sizeof_src_line = sizeof(*src_line) +
-			  (sizeof(src_line->p) * (src_line->nr_pcnt - 1));
+			  (sizeof(src_line->samples) * (src_line->nr_pcnt - 1));
 
 	for (i = 0; i < len; i++) {
 		free_srcline(src_line->path);
@@ -1162,7 +1229,7 @@ static int symbol__get_source_line(struct symbol *sym, struct map *map,
 			h_sum += h->sum;
 		}
 		nr_pcnt = evsel->nr_members;
-		sizeof_src_line += (nr_pcnt - 1) * sizeof(src_line->p);
+		sizeof_src_line += (nr_pcnt - 1) * sizeof(src_line->samples);
 	}
 
 	if (!h_sum)
@@ -1182,10 +1249,10 @@ static int symbol__get_source_line(struct symbol *sym, struct map *map,
 
 		for (k = 0; k < nr_pcnt; k++) {
 			h = annotation__histogram(notes, evidx + k);
-			src_line->p[k].percent = 100.0 * h->addr[i] / h->sum;
+			src_line->samples[k].percent = 100.0 * h->addr[i] / h->sum;
 
-			if (src_line->p[k].percent > percent_max)
-				percent_max = src_line->p[k].percent;
+			if (src_line->samples[k].percent > percent_max)
+				percent_max = src_line->samples[k].percent;
 		}
 
 		if (percent_max <= 0.5)
@@ -1225,7 +1292,7 @@ static void print_summary(struct rb_root *root, const char *filename)
 
 		src_line = rb_entry(node, struct source_line, node);
 		for (i = 0; i < src_line->nr_pcnt; i++) {
-			percent = src_line->p[i].percent_sum;
+			percent = src_line->samples[i].percent_sum;
 			color = get_percent_color(percent);
 			color_fprintf(stdout, color, " %7.2f", percent);
 

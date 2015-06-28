@@ -386,7 +386,7 @@ static int snd_soc_put_volsw_2r_out(struct snd_kcontrol *kcontrol,
 static int pm860x_rsync_event(struct snd_soc_dapm_widget *w,
 			      struct snd_kcontrol *kcontrol, int event)
 {
-	struct snd_soc_codec *codec = w->codec;
+	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(w->dapm);
 
 	/*
 	 * In order to avoid current on the load, mute power-on and power-off
@@ -403,7 +403,7 @@ static int pm860x_rsync_event(struct snd_soc_dapm_widget *w,
 static int pm860x_dac_event(struct snd_soc_dapm_widget *w,
 			    struct snd_kcontrol *kcontrol, int event)
 {
-	struct snd_soc_codec *codec = w->codec;
+	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(w->dapm);
 	unsigned int dac = 0;
 	int data;
 
@@ -1140,7 +1140,7 @@ static int pm860x_set_bias_level(struct snd_soc_codec *codec,
 		break;
 
 	case SND_SOC_BIAS_STANDBY:
-		if (codec->dapm.bias_level == SND_SOC_BIAS_OFF) {
+		if (snd_soc_codec_get_bias_level(codec) == SND_SOC_BIAS_OFF) {
 			/* Enable Audio PLL & Audio section */
 			data = AUDIO_PLL | AUDIO_SECTION_ON;
 			pm860x_reg_write(pm860x->i2c, REG_MISC2, data);
@@ -1156,7 +1156,6 @@ static int pm860x_set_bias_level(struct snd_soc_codec *codec,
 		pm860x_set_bits(pm860x->i2c, REG_MISC2, data, 0);
 		break;
 	}
-	codec->dapm.bias_level = level;
 	return 0;
 }
 
@@ -1187,16 +1186,16 @@ static struct snd_soc_dai_driver pm860x_dai[] = {
 			.channels_min	= 2,
 			.channels_max	= 2,
 			.rates		= PM860X_RATES,
-			.formats	= SNDRV_PCM_FORMAT_S16_LE | \
-					  SNDRV_PCM_FORMAT_S18_3LE,
+			.formats	= SNDRV_PCM_FMTBIT_S16_LE | \
+					  SNDRV_PCM_FMTBIT_S18_3LE,
 		},
 		.capture = {
 			.stream_name	= "PCM Capture",
 			.channels_min	= 2,
 			.channels_max	= 2,
 			.rates		= PM860X_RATES,
-			.formats	= SNDRV_PCM_FORMAT_S16_LE | \
-					  SNDRV_PCM_FORMAT_S18_3LE,
+			.formats	= SNDRV_PCM_FMTBIT_S16_LE | \
+					  SNDRV_PCM_FMTBIT_S18_3LE,
 		},
 		.ops	= &pm860x_pcm_dai_ops,
 	}, {
@@ -1208,16 +1207,16 @@ static struct snd_soc_dai_driver pm860x_dai[] = {
 			.channels_min	= 2,
 			.channels_max	= 2,
 			.rates		= SNDRV_PCM_RATE_8000_48000,
-			.formats	= SNDRV_PCM_FORMAT_S16_LE | \
-					  SNDRV_PCM_FORMAT_S18_3LE,
+			.formats	= SNDRV_PCM_FMTBIT_S16_LE | \
+					  SNDRV_PCM_FMTBIT_S18_3LE,
 		},
 		.capture = {
 			.stream_name	= "I2S Capture",
 			.channels_min	= 2,
 			.channels_max	= 2,
 			.rates		= SNDRV_PCM_RATE_8000_48000,
-			.formats	= SNDRV_PCM_FORMAT_S16_LE | \
-					  SNDRV_PCM_FORMAT_S18_3LE,
+			.formats	= SNDRV_PCM_FMTBIT_S16_LE | \
+					  SNDRV_PCM_FMTBIT_S18_3LE,
 		},
 		.ops	= &pm860x_i2s_dai_ops,
 	},

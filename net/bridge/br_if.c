@@ -249,7 +249,7 @@ static void del_nbp(struct net_bridge_port *p)
 	list_del_rcu(&p->list);
 
 	nbp_vlan_flush(p);
-	br_fdb_delete_by_port(br, p, 1);
+	br_fdb_delete_by_port(br, p, 0, 1);
 	nbp_update_port_count(br);
 
 	netdev_upper_dev_unlink(dev, br->dev);
@@ -278,7 +278,7 @@ void br_dev_delete(struct net_device *dev, struct list_head *head)
 		del_nbp(p);
 	}
 
-	br_fdb_delete_by_port(br, NULL, 1);
+	br_fdb_delete_by_port(br, NULL, 0, 1);
 
 	br_vlan_flush(br);
 	del_timer_sync(&br->gc_timer);
@@ -424,6 +424,7 @@ netdev_features_t br_features_recompute(struct net_bridge *br,
 		features = netdev_increment_features(features,
 						     p->dev->features, mask);
 	}
+	features = netdev_add_tso_features(features, mask);
 
 	return features;
 }
@@ -435,10 +436,16 @@ int br_add_if(struct net_bridge *br, struct net_device *dev)
 	int err = 0;
 	bool changed_addr;
 
-	/* Don't allow bridging non-ethernet like devices */
+	/* Don't allow bridging non-ethernet like devices, or DSA-enabled
+	 * master network devices since the bridge layer rx_handler prevents
+	 * the DSA fake ethertype handler to be invoked, so we do not strip off
+	 * the DSA switch tag protocol header and the bridge layer just return
+	 * RX_HANDLER_CONSUMED, stopping RX processing for these frames.
+	 */
 	if ((dev->flags & IFF_LOOPBACK) ||
 	    dev->type != ARPHRD_ETHER || dev->addr_len != ETH_ALEN ||
-	    !is_valid_ether_addr(dev->dev_addr))
+	    !is_valid_ether_addr(dev->dev_addr) ||
+	    netdev_uses_dsa(dev))
 		return -EINVAL;
 
 	/* No bridging of bridges */
@@ -555,6 +562,8 @@ int br_del_if(struct net_bridge *br, struct net_device *dev)
 	 * therefore there is no reason for a NETDEV_RELEASE event.
 	 */
 	del_nbp(p);
+
+	dev_set_mtu(br->dev, br_min_mtu(br));
 
 	spin_lock_bh(&br->lock);
 	changed_addr = br_stp_recalculate_bridge_id(br);

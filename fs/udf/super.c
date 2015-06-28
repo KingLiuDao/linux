@@ -48,7 +48,6 @@
 #include <linux/stat.h>
 #include <linux/cdrom.h>
 #include <linux/nls.h>
-#include <linux/buffer_head.h>
 #include <linux/vfs.h>
 #include <linux/vmalloc.h>
 #include <linux/errno.h>
@@ -928,17 +927,23 @@ static int udf_load_pvoldesc(struct super_block *sb, sector_t block)
 #endif
 	}
 
-	if (!udf_build_ustr(instr, pvoldesc->volIdent, 32))
-		if (udf_CS0toUTF8(outstr, instr)) {
-			strncpy(UDF_SB(sb)->s_volume_ident, outstr->u_name,
-				outstr->u_len > 31 ? 31 : outstr->u_len);
-			udf_debug("volIdent[] = '%s'\n",
-				  UDF_SB(sb)->s_volume_ident);
-		}
+	if (!udf_build_ustr(instr, pvoldesc->volIdent, 32)) {
+		ret = udf_CS0toUTF8(outstr, instr);
+		if (ret < 0)
+			goto out_bh;
 
-	if (!udf_build_ustr(instr, pvoldesc->volSetIdent, 128))
-		if (udf_CS0toUTF8(outstr, instr))
-			udf_debug("volSetIdent[] = '%s'\n", outstr->u_name);
+		strncpy(UDF_SB(sb)->s_volume_ident, outstr->u_name,
+			outstr->u_len > 31 ? 31 : outstr->u_len);
+		udf_debug("volIdent[] = '%s'\n", UDF_SB(sb)->s_volume_ident);
+	}
+
+	if (!udf_build_ustr(instr, pvoldesc->volSetIdent, 128)) {
+		ret = udf_CS0toUTF8(outstr, instr);
+		if (ret < 0)
+			goto out_bh;
+
+		udf_debug("volSetIdent[] = '%s'\n", outstr->u_name);
+	}
 
 	ret = 0;
 out_bh:
@@ -1599,7 +1604,7 @@ static noinline int udf_process_sequence(
 	struct udf_vds_record *curr;
 	struct generic_desc *gd;
 	struct volDescPtr *vdp;
-	int done = 0;
+	bool done = false;
 	uint32_t vdsn;
 	uint16_t ident;
 	long next_s = 0, next_e = 0;
@@ -1680,7 +1685,7 @@ static noinline int udf_process_sequence(
 				lastblock = next_e;
 				next_s = next_e = 0;
 			} else
-				done = 1;
+				done = true;
 			break;
 		}
 		brelse(bh);
@@ -2300,6 +2305,7 @@ static void udf_put_super(struct super_block *sb)
 		udf_close_lvid(sb);
 	brelse(sbi->s_lvid_bh);
 	udf_sb_free_partitions(sb);
+	mutex_destroy(&sbi->s_alloc_mutex);
 	kfree(sb->s_fs_info);
 	sb->s_fs_info = NULL;
 }

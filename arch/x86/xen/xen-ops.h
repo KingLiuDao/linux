@@ -10,6 +10,12 @@
 extern const char xen_hypervisor_callback[];
 extern const char xen_failsafe_callback[];
 
+void xen_sysenter_target(void);
+#ifdef CONFIG_X86_64
+void xen_syscall_target(void);
+void xen_syscall32_target(void);
+#endif
+
 extern void *xen_initial_gdt;
 
 struct trap_info;
@@ -128,7 +134,9 @@ DECL_ASM(void, xen_restore_fl_direct, unsigned long);
 
 /* These are not functions, and cannot be called normally */
 __visible void xen_iret(void);
+#ifdef CONFIG_X86_32
 __visible void xen_sysexit(void);
+#endif
 __visible void xen_sysret32(void);
 __visible void xen_sysret64(void);
 __visible void xen_adjust_exception_frame(void);

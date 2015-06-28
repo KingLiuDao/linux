@@ -181,6 +181,9 @@ struct mii_bus {
 	/* PHY addresses to be ignored when probing */
 	u32 phy_mask;
 
+	/* PHY addresses to ignore the TA/read failure */
+	u32 phy_ignore_ta_mask;
+
 	/*
 	 * Pointer to an array of interrupts, each PHY's
 	 * interrupt at the index matching its address
@@ -327,6 +330,8 @@ struct phy_c45_device_ids {
  * c45_ids: 802.3-c45 Device Identifers if is_c45.
  * is_c45:  Set to true if this phy uses clause 45 addressing.
  * is_internal: Set to true if this phy is internal to a MAC.
+ * has_fixups: Set to true if this phy has fixups/quirks.
+ * suspended: Set to true if this phy has been suspended successfully.
  * state: state of the PHY for management purposes
  * dev_flags: Device-specific flags used by the PHY driver.
  * addr: Bus address of PHY
@@ -364,6 +369,7 @@ struct phy_device {
 	bool is_c45;
 	bool is_internal;
 	bool has_fixups;
+	bool suspended;
 
 	enum phy_state state;
 
@@ -565,6 +571,15 @@ struct phy_driver {
 	void (*write_mmd_indirect)(struct phy_device *dev, int ptrad,
 				   int devnum, int regnum, u32 val);
 
+	/* Get the size and type of the eeprom contained within a plug-in
+	 * module */
+	int (*module_info)(struct phy_device *dev,
+			   struct ethtool_modinfo *modinfo);
+
+	/* Get the eeprom information from the plug-in module */
+	int (*module_eeprom)(struct phy_device *dev,
+			     struct ethtool_eeprom *ee, u8 *data);
+
 	struct device_driver driver;
 };
 #define to_phy_driver(d) container_of(d, struct phy_driver, driver)
@@ -660,6 +675,17 @@ static inline bool phy_interrupt_is_valid(struct phy_device *phydev)
 static inline bool phy_is_internal(struct phy_device *phydev)
 {
 	return phydev->is_internal;
+}
+
+/**
+ * phy_interface_is_rgmii - Convenience function for testing if a PHY interface
+ * is RGMII (all variants)
+ * @phydev: the phy_device struct
+ */
+static inline bool phy_interface_is_rgmii(struct phy_device *phydev)
+{
+	return phydev->interface >= PHY_INTERFACE_MODE_RGMII &&
+		phydev->interface <= PHY_INTERFACE_MODE_RGMII_TXID;
 }
 
 /**

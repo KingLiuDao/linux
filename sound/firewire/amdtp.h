@@ -29,6 +29,9 @@
  *	packet is not continuous from an initial value.
  * @CIP_EMPTY_HAS_WRONG_DBC: Only for in-stream. The value of dbc in empty
  *	packet is wrong but the others are correct.
+ * @CIP_JUMBO_PAYLOAD: Only for in-stream. The number of data blocks in an
+ *	packet is larger than IEC 61883-6 defines. Current implementation
+ *	allows 5 times as large as IEC 61883-6 defines.
  */
 enum cip_flags {
 	CIP_NONBLOCKING		= 0x00,
@@ -40,6 +43,7 @@ enum cip_flags {
 	CIP_SKIP_DBC_ZERO_CHECK	= 0x20,
 	CIP_SKIP_INIT_DBC_CHECK	= 0x40,
 	CIP_EMPTY_HAS_WRONG_DBC	= 0x80,
+	CIP_JUMBO_PAYLOAD	= 0x100,
 };
 
 /**
@@ -148,12 +152,11 @@ struct amdtp_stream {
 	bool double_pcm_frames;
 
 	struct snd_rawmidi_substream *midi[AMDTP_MAX_CHANNELS_FOR_MIDI * 8];
+	int midi_fifo_limit;
+	int midi_fifo_used[AMDTP_MAX_CHANNELS_FOR_MIDI * 8];
 
 	/* quirk: fixed interval of dbc between previos/current packets. */
 	unsigned int tx_dbc_interval;
-
-	/* quirk: the first count of data blocks in an rx packet for MIDI */
-	unsigned int rx_blocks_for_midi;
 
 	bool callbacked;
 	wait_queue_head_t callback_wait;

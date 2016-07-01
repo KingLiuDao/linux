@@ -433,9 +433,9 @@ static int s921_set_frontend(struct dvb_frontend *fe)
 	return 0;
 }
 
-static int s921_get_frontend(struct dvb_frontend *fe)
+static int s921_get_frontend(struct dvb_frontend *fe,
+			     struct dtv_frontend_properties *p)
 {
-	struct dtv_frontend_properties *p = &fe->dtv_property_cache;
 	struct s921_state *state = fe->demodulator_priv;
 
 	/* FIXME: Probably it is possible to get it from regs f1 and f2 */
@@ -466,7 +466,7 @@ static int s921_tune(struct dvb_frontend *fe,
 
 static int s921_get_algo(struct dvb_frontend *fe)
 {
-	return 1; /* FE_ALGO_HW */
+	return DVBFE_ALGO_HW;
 }
 
 static void s921_release(struct dvb_frontend *fe)

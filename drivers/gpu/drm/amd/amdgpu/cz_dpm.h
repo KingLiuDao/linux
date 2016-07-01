@@ -46,7 +46,7 @@
 
 /* Do not change the following, it is also defined in SMU8.h */
 #define SMU_EnabledFeatureScoreboard_AcpDpmOn		0x00000001
-#define SMU_EnabledFeatureScoreboard_SclkDpmOn		0x00100000
+#define SMU_EnabledFeatureScoreboard_SclkDpmOn		0x00200000
 #define SMU_EnabledFeatureScoreboard_UvdDpmOn		0x00800000
 #define SMU_EnabledFeatureScoreboard_VceDpmOn		0x01000000
 
@@ -183,6 +183,8 @@ struct cz_power_info {
 	uint32_t voltage_drop_threshold;
 	uint32_t gfx_pg_threshold;
 	uint32_t max_sclk_level;
+	uint32_t max_uvd_level;
+	uint32_t max_vce_level;
 	/* flags */
 	bool didt_enabled;
 	bool video_start;

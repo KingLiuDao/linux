@@ -480,7 +480,7 @@ static struct omap_hwmod am43xx_dss_core_hwmod = {
 
 /* dispc */
 
-struct omap_dss_dispc_dev_attr am43xx_dss_dispc_dev_attr = {
+static struct omap_dss_dispc_dev_attr am43xx_dss_dispc_dev_attr = {
 	.manager_count		= 1,
 	.has_framedonetv_irq	= 0
 };
@@ -1020,9 +1020,21 @@ static struct omap_hwmod_ocp_if *am43xx_hwmod_ocp_ifs[] __initdata = {
 	NULL,
 };
 
+static struct omap_hwmod_ocp_if *am43xx_rtc_hwmod_ocp_ifs[] __initdata = {
+	&am33xx_l4_wkup__rtc,
+	NULL,
+};
+
 int __init am43xx_hwmod_init(void)
 {
+	int ret;
+
 	omap_hwmod_am43xx_reg();
 	omap_hwmod_init();
-	return omap_hwmod_register_links(am43xx_hwmod_ocp_ifs);
+	ret = omap_hwmod_register_links(am43xx_hwmod_ocp_ifs);
+
+	if (!ret && of_machine_is_compatible("ti,am4372"))
+		ret = omap_hwmod_register_links(am43xx_rtc_hwmod_ocp_ifs);
+
+	return ret;
 }

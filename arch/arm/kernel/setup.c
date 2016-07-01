@@ -7,6 +7,7 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
+#include <linux/efi.h>
 #include <linux/export.h>
 #include <linux/kernel.h>
 #include <linux/stddef.h>
@@ -31,12 +32,16 @@
 #include <linux/bug.h>
 #include <linux/compiler.h>
 #include <linux/sort.h>
+#include <linux/psci.h>
 
 #include <asm/unified.h>
 #include <asm/cp15.h>
 #include <asm/cpu.h>
 #include <asm/cputype.h>
+#include <asm/efi.h>
 #include <asm/elf.h>
+#include <asm/early_ioremap.h>
+#include <asm/fixmap.h>
 #include <asm/procinfo.h>
 #include <asm/psci.h>
 #include <asm/sections.h>
@@ -46,6 +51,7 @@
 #include <asm/cacheflush.h>
 #include <asm/cachetype.h>
 #include <asm/tlbflush.h>
+#include <asm/xen/hypervisor.h>
 
 #include <asm/prom.h>
 #include <asm/mach/arch.h>
@@ -170,13 +176,13 @@ static struct resource mem_res[] = {
 		.name = "Kernel code",
 		.start = 0,
 		.end = 0,
-		.flags = IORESOURCE_MEM
+		.flags = IORESOURCE_SYSTEM_RAM
 	},
 	{
 		.name = "Kernel data",
 		.start = 0,
 		.end = 0,
-		.flags = IORESOURCE_MEM
+		.flags = IORESOURCE_SYSTEM_RAM
 	}
 };
 
@@ -372,6 +378,74 @@ void __init early_print(const char *str, ...)
 	printk("%s", buf);
 }
 
+#ifdef CONFIG_ARM_PATCH_IDIV
+
+static inline u32 __attribute_const__ sdiv_instruction(void)
+{
+	if (IS_ENABLED(CONFIG_THUMB2_KERNEL)) {
+		/* "sdiv r0, r0, r1" */
+		u32 insn = __opcode_thumb32_compose(0xfb90, 0xf0f1);
+		return __opcode_to_mem_thumb32(insn);
+	}
+
+	/* "sdiv r0, r0, r1" */
+	return __opcode_to_mem_arm(0xe710f110);
+}
+
+static inline u32 __attribute_const__ udiv_instruction(void)
+{
+	if (IS_ENABLED(CONFIG_THUMB2_KERNEL)) {
+		/* "udiv r0, r0, r1" */
+		u32 insn = __opcode_thumb32_compose(0xfbb0, 0xf0f1);
+		return __opcode_to_mem_thumb32(insn);
+	}
+
+	/* "udiv r0, r0, r1" */
+	return __opcode_to_mem_arm(0xe730f110);
+}
+
+static inline u32 __attribute_const__ bx_lr_instruction(void)
+{
+	if (IS_ENABLED(CONFIG_THUMB2_KERNEL)) {
+		/* "bx lr; nop" */
+		u32 insn = __opcode_thumb32_compose(0x4770, 0x46c0);
+		return __opcode_to_mem_thumb32(insn);
+	}
+
+	/* "bx lr" */
+	return __opcode_to_mem_arm(0xe12fff1e);
+}
+
+static void __init patch_aeabi_idiv(void)
+{
+	extern void __aeabi_uidiv(void);
+	extern void __aeabi_idiv(void);
+	uintptr_t fn_addr;
+	unsigned int mask;
+
+	mask = IS_ENABLED(CONFIG_THUMB2_KERNEL) ? HWCAP_IDIVT : HWCAP_IDIVA;
+	if (!(elf_hwcap & mask))
+		return;
+
+	pr_info("CPU: div instructions available: patching division code\n");
+
+	fn_addr = ((uintptr_t)&__aeabi_uidiv) & ~1;
+	asm ("" : "+g" (fn_addr));
+	((u32 *)fn_addr)[0] = udiv_instruction();
+	((u32 *)fn_addr)[1] = bx_lr_instruction();
+	flush_icache_range(fn_addr, fn_addr + 8);
+
+	fn_addr = ((uintptr_t)&__aeabi_idiv) & ~1;
+	asm ("" : "+g" (fn_addr));
+	((u32 *)fn_addr)[0] = sdiv_instruction();
+	((u32 *)fn_addr)[1] = bx_lr_instruction();
+	flush_icache_range(fn_addr, fn_addr + 8);
+}
+
+#else
+static inline void patch_aeabi_idiv(void) { }
+#endif
+
 static void __init cpuid_init_hwcaps(void)
 {
 	int block;
@@ -438,7 +512,7 @@ static void __init elf_hwcap_fixup(void)
 	 */
 	if (cpuid_feature_extract(CPUID_EXT_ISAR3, 12) > 1 ||
 	    (cpuid_feature_extract(CPUID_EXT_ISAR3, 12) == 1 &&
-	     cpuid_feature_extract(CPUID_EXT_ISAR3, 20) >= 3))
+	     cpuid_feature_extract(CPUID_EXT_ISAR4, 20) >= 3))
 		elf_hwcap &= ~HWCAP_SWP;
 }
 
@@ -639,6 +713,7 @@ static void __init setup_processor(void)
 	elf_hwcap = list->elf_hwcap;
 
 	cpuid_init_hwcaps();
+	patch_aeabi_idiv();
 
 #ifndef CONFIG_ARM_THUMB
 	elf_hwcap &= ~(HWCAP_THUMB | HWCAP_IDIVT);
@@ -778,7 +853,7 @@ static void __init request_standard_resources(const struct machine_desc *mdesc)
 		res->name  = "System RAM";
 		res->start = __pfn_to_phys(memblock_region_memory_base_pfn(region));
 		res->end = __pfn_to_phys(memblock_region_memory_end_pfn(region)) - 1;
-		res->flags = IORESOURCE_MEM | IORESOURCE_BUSY;
+		res->flags = IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY;
 
 		request_resource(&iomem_resource, res);
 
@@ -808,7 +883,8 @@ static void __init request_standard_resources(const struct machine_desc *mdesc)
 		request_resource(&ioport_resource, &lp2);
 }
 
-#if defined(CONFIG_VGA_CONSOLE) || defined(CONFIG_DUMMY_CONSOLE)
+#if defined(CONFIG_VGA_CONSOLE) || defined(CONFIG_DUMMY_CONSOLE) || \
+    defined(CONFIG_EFI)
 struct screen_info screen_info = {
  .orig_video_lines	= 30,
  .orig_video_cols	= 80,
@@ -865,6 +941,12 @@ static int __init init_machine_late(void)
 late_initcall(init_machine_late);
 
 #ifdef CONFIG_KEXEC
+/*
+ * The crash region must be aligned to 128MB to avoid
+ * zImage relocating below the reserved region.
+ */
+#define CRASH_ALIGN	(128 << 20)
+
 static inline unsigned long long get_total_mem(void)
 {
 	unsigned long total;
@@ -891,6 +973,26 @@ static void __init reserve_crashkernel(void)
 				&crash_size, &crash_base);
 	if (ret)
 		return;
+
+	if (crash_base <= 0) {
+		unsigned long long crash_max = idmap_to_phys((u32)~0);
+		crash_base = memblock_find_in_range(CRASH_ALIGN, crash_max,
+						    crash_size, CRASH_ALIGN);
+		if (!crash_base) {
+			pr_err("crashkernel reservation failed - No suitable area found.\n");
+			return;
+		}
+	} else {
+		unsigned long long start;
+
+		start = memblock_find_in_range(crash_base,
+					       crash_base + crash_size,
+					       crash_size, SECTION_SIZE);
+		if (start != crash_base) {
+			pr_err("crashkernel reservation failed - memory is in use.\n");
+			return;
+		}
+	}
 
 	ret = memblock_reserve(crash_base, crash_size);
 	if (ret < 0) {
@@ -953,14 +1055,20 @@ void __init setup_arch(char **cmdline_p)
 	strlcpy(cmd_line, boot_command_line, COMMAND_LINE_SIZE);
 	*cmdline_p = cmd_line;
 
+	early_fixmap_init();
+	early_ioremap_init();
+
 	parse_early_param();
 
 #ifdef CONFIG_MMU
 	early_paging_init(mdesc);
 #endif
 	setup_dma_zone(mdesc);
+	efi_init();
 	sanity_check_meminfo();
 	arm_memblock_init(mdesc);
+
+	early_ioremap_reset();
 
 	paging_init(mdesc);
 	request_standard_resources(mdesc);
@@ -971,7 +1079,8 @@ void __init setup_arch(char **cmdline_p)
 	unflatten_device_tree();
 
 	arm_dt_init_cpu_maps();
-	psci_init();
+	psci_dt_init();
+	xen_early_init();
 #ifdef CONFIG_SMP
 	if (is_smp()) {
 		if (!mdesc->smp_init || !mdesc->smp_init()) {
@@ -1013,7 +1122,7 @@ static int __init topology_init(void)
 
 	for_each_possible_cpu(cpu) {
 		struct cpuinfo_arm *cpuinfo = &per_cpu(cpu_data, cpu);
-		cpuinfo->cpu.hotpluggable = 1;
+		cpuinfo->cpu.hotpluggable = platform_can_hotplug_cpu(cpu);
 		register_cpu(&cpuinfo->cpu, cpu);
 	}
 

@@ -1,10 +1,9 @@
-/* Copyright (C) 2010 - 2013 UNISYS CORPORATION
+/* Copyright (C) 2010 - 2015 UNISYS CORPORATION
  * All rights reserved.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or (at
- * your option) any later version.
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms and conditions of the GNU General Public License,
+ * version 2, as published by the Free Software Foundation.
  *
  * This program is distributed in the hope that it will be useful, but
  * WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -63,7 +62,7 @@ vbuschannel_sanitize_buffer(char *p, int remain, char *src, int srcmax)
 					p++;
 					remain--;
 					chars++;
-				} else if (p == NULL) {
+				} else if (!p) {
 					chars++;
 				}
 				nonprintable_streak = 0;
@@ -73,7 +72,7 @@ vbuschannel_sanitize_buffer(char *p, int remain, char *src, int srcmax)
 				p++;
 				remain--;
 				chars++;
-			} else if (p == NULL) {
+			} else if (!p) {
 				chars++;
 			}
 		} else {
@@ -125,7 +124,8 @@ vbuschannel_itoa(char *p, int remain, int num)
 	}
 	if (remain < digits) {
 		/* not enough room left at <p> to hold number, so fill with
-		 * '?' */
+		 * '?'
+		 */
 		for (i = 0; i < remain; i++, p++)
 			*p = '?';
 		return remain;

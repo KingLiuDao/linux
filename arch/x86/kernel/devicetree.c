@@ -65,7 +65,7 @@ static int __init add_bus_probe(void)
 
 	return of_platform_bus_probe(NULL, ce4100_ids, NULL);
 }
-module_init(add_bus_probe);
+device_initcall(add_bus_probe);
 
 #ifdef CONFIG_PCI
 struct device_node *pcibios_get_phb_of_node(struct pci_bus *bus)
@@ -151,7 +151,7 @@ static void __init dtb_lapic_setup(void)
 		return;
 
 	/* Did the boot loader setup the local APIC ? */
-	if (!cpu_has_apic) {
+	if (!boot_cpu_has(X86_FEATURE_APIC)) {
 		if (apic_force_enable(r.start))
 			return;
 	}

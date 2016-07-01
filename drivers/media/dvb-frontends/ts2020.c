@@ -712,6 +712,10 @@ static int ts2020_remove(struct i2c_client *client)
 
 	dev_dbg(&client->dev, "\n");
 
+	/* stop statistics polling */
+	if (!dev->dont_poll)
+		cancel_delayed_work_sync(&dev->stat_work);
+
 	regmap_exit(dev->regmap);
 	kfree(dev);
 	return 0;
@@ -726,7 +730,6 @@ MODULE_DEVICE_TABLE(i2c, ts2020_id_table);
 
 static struct i2c_driver ts2020_driver = {
 	.driver = {
-		.owner	= THIS_MODULE,
 		.name	= "ts2020",
 	},
 	.probe		= ts2020_probe,

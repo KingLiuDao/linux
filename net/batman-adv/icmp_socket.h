@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2015 B.A.T.M.A.N. contributors:
+/* Copyright (C) 2007-2016  B.A.T.M.A.N. contributors:
  *
  * Marek Lindner
  *
@@ -23,7 +23,6 @@
 #include <linux/types.h>
 
 struct batadv_icmp_header;
-struct batadv_priv;
 
 #define BATADV_ICMP_SOCKET "socket"
 

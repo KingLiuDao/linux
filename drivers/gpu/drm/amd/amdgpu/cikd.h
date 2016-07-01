@@ -46,9 +46,6 @@
 #define BONAIRE_GB_ADDR_CONFIG_GOLDEN        0x12010001
 #define HAWAII_GB_ADDR_CONFIG_GOLDEN         0x12011003
 
-#define CIK_RB_BITMAP_WIDTH_PER_SH     2
-#define HAWAII_RB_BITMAP_WIDTH_PER_SH  4
-
 #define AMDGPU_NUM_OF_VMIDS	8
 
 #define		PIPEID(x)					((x) << 0)
@@ -193,8 +190,8 @@
 #       define MACRO_TILE_ASPECT(x)				((x) << 4)
 #       define NUM_BANKS(x)					((x) << 6)
 
-#define		MSG_ENTER_RLC_SAFE_MODE      			1
-#define		MSG_EXIT_RLC_SAFE_MODE      			0
+#define		MSG_ENTER_RLC_SAFE_MODE			1
+#define		MSG_EXIT_RLC_SAFE_MODE			0
 
 /*
  * PM4
@@ -487,6 +484,7 @@
 					 (((op) & 0xFF) << 0))
 /* sDMA opcodes */
 #define	SDMA_OPCODE_NOP					  0
+#	define SDMA_NOP_COUNT(x)			  (((x) & 0x3FFF) << 16)
 #define	SDMA_OPCODE_COPY				  1
 #       define SDMA_COPY_SUB_OPCODE_LINEAR                0
 #       define SDMA_COPY_SUB_OPCODE_TILED                 1
@@ -551,5 +549,17 @@
 #define VCE_CMD_TRAP		0x00000004
 #define VCE_CMD_IB_AUTO		0x00000005
 #define VCE_CMD_SEMAPHORE	0x00000006
+
+/* if PTR32, these are the bases for scratch and lds */
+#define	PRIVATE_BASE(x)	((x) << 0) /* scratch */
+#define	SHARED_BASE(x)	((x) << 16) /* LDS */
+
+#define KFD_CIK_SDMA_QUEUE_OFFSET	0x200
+
+/* valid for both DEFAULT_MTYPE and APE1_MTYPE */
+enum {
+	MTYPE_CACHED = 0,
+	MTYPE_NONCACHED = 3
+};
 
 #endif

@@ -17,6 +17,7 @@
  * this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_plane_helper.h>
 
@@ -59,17 +60,19 @@ to_omap_plane_state(struct drm_plane_state *state)
 }
 
 static int omap_plane_prepare_fb(struct drm_plane *plane,
-				 struct drm_framebuffer *fb,
 				 const struct drm_plane_state *new_state)
 {
-	return omap_framebuffer_pin(fb);
+	if (!new_state->fb)
+		return 0;
+
+	return omap_framebuffer_pin(new_state->fb);
 }
 
 static void omap_plane_cleanup_fb(struct drm_plane *plane,
-				  struct drm_framebuffer *fb,
 				  const struct drm_plane_state *old_state)
 {
-	omap_framebuffer_unpin(fb);
+	if (old_state->fb)
+		omap_framebuffer_unpin(old_state->fb);
 }
 
 static void omap_plane_atomic_update(struct drm_plane *plane,
@@ -105,7 +108,7 @@ static void omap_plane_atomic_update(struct drm_plane *plane,
 	win.src_x = state->src_x >> 16;
 	win.src_y = state->src_y >> 16;
 
-	switch (state->rotation & 0xf) {
+	switch (state->rotation & DRM_ROTATE_MASK) {
 	case BIT(DRM_ROTATE_90):
 	case BIT(DRM_ROTATE_270):
 		win.src_w = state->src_h >> 16;
@@ -153,39 +156,43 @@ static void omap_plane_atomic_disable(struct drm_plane *plane,
 	dispc_ovl_enable(omap_plane->id, false);
 }
 
+static int omap_plane_atomic_check(struct drm_plane *plane,
+				   struct drm_plane_state *state)
+{
+	struct drm_crtc_state *crtc_state;
+
+	if (!state->crtc)
+		return 0;
+
+	crtc_state = drm_atomic_get_crtc_state(state->state, state->crtc);
+	if (IS_ERR(crtc_state))
+		return PTR_ERR(crtc_state);
+
+	if (state->crtc_x < 0 || state->crtc_y < 0)
+		return -EINVAL;
+
+	if (state->crtc_x + state->crtc_w > crtc_state->adjusted_mode.hdisplay)
+		return -EINVAL;
+
+	if (state->crtc_y + state->crtc_h > crtc_state->adjusted_mode.vdisplay)
+		return -EINVAL;
+
+	if (state->fb) {
+		if (state->rotation != BIT(DRM_ROTATE_0) &&
+		    !omap_framebuffer_supports_rotation(state->fb))
+			return -EINVAL;
+	}
+
+	return 0;
+}
+
 static const struct drm_plane_helper_funcs omap_plane_helper_funcs = {
 	.prepare_fb = omap_plane_prepare_fb,
 	.cleanup_fb = omap_plane_cleanup_fb,
+	.atomic_check = omap_plane_atomic_check,
 	.atomic_update = omap_plane_atomic_update,
 	.atomic_disable = omap_plane_atomic_disable,
 };
-
-static void omap_plane_reset(struct drm_plane *plane)
-{
-	struct omap_plane *omap_plane = to_omap_plane(plane);
-	struct omap_plane_state *omap_state;
-
-	if (plane->state && plane->state->fb)
-		drm_framebuffer_unreference(plane->state->fb);
-
-	kfree(plane->state);
-	plane->state = NULL;
-
-	omap_state = kzalloc(sizeof(*omap_state), GFP_KERNEL);
-	if (omap_state == NULL)
-		return;
-
-	/*
-	 * Set defaults depending on whether we are a primary or overlay
-	 * plane.
-	 */
-	omap_state->zorder = plane->type == DRM_PLANE_TYPE_PRIMARY
-			   ? 0 : omap_plane->id;
-	omap_state->base.rotation = BIT(DRM_ROTATE_0);
-
-	plane->state = &omap_state->base;
-	plane->state->plane = plane;
-}
 
 static void omap_plane_destroy(struct drm_plane *plane)
 {
@@ -238,8 +245,34 @@ omap_plane_atomic_duplicate_state(struct drm_plane *plane)
 static void omap_plane_atomic_destroy_state(struct drm_plane *plane,
 					    struct drm_plane_state *state)
 {
-	__drm_atomic_helper_plane_destroy_state(plane, state);
+	__drm_atomic_helper_plane_destroy_state(state);
 	kfree(to_omap_plane_state(state));
+}
+
+static void omap_plane_reset(struct drm_plane *plane)
+{
+	struct omap_plane *omap_plane = to_omap_plane(plane);
+	struct omap_plane_state *omap_state;
+
+	if (plane->state) {
+		omap_plane_atomic_destroy_state(plane, plane->state);
+		plane->state = NULL;
+	}
+
+	omap_state = kzalloc(sizeof(*omap_state), GFP_KERNEL);
+	if (omap_state == NULL)
+		return;
+
+	/*
+	 * Set defaults depending on whether we are a primary or overlay
+	 * plane.
+	 */
+	omap_state->zorder = plane->type == DRM_PLANE_TYPE_PRIMARY
+			   ? 0 : omap_plane->id;
+	omap_state->base.rotation = BIT(DRM_ROTATE_0);
+
+	plane->state = &omap_state->base;
+	plane->state->plane = plane;
 }
 
 static int omap_plane_atomic_set_property(struct drm_plane *plane,
@@ -338,7 +371,7 @@ struct drm_plane *omap_plane_init(struct drm_device *dev,
 
 	ret = drm_universal_plane_init(dev, plane, (1 << priv->num_crtcs) - 1,
 				       &omap_plane_funcs, omap_plane->formats,
-				       omap_plane->nformats, type);
+				       omap_plane->nformats, type, NULL);
 	if (ret < 0)
 		goto error;
 

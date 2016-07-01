@@ -185,7 +185,6 @@ void odm_CCKPacketDetectionThresh23a(struct dm_odm_t *pDM_Odm);
 /* START-------BB POWER SAVE----------------------- */
 void odm23a_DynBBPSInit(struct dm_odm_t *pDM_Odm);
 
-void odm_DynamicBBPowerSaving23a(struct dm_odm_t *pDM_Odm);
 
 /* END---------BB POWER SAVE----------------------- */
 
@@ -270,7 +269,6 @@ void ODM_DMWatchdog23a(struct rtw_adapter *adapter)
 
 	odm_RefreshRateAdaptiveMask(pDM_Odm);
 
-	odm_DynamicBBPowerSaving23a(pDM_Odm);
 
 	odm_EdcaTurboCheck23a(pDM_Odm);
 }
@@ -894,10 +892,6 @@ void odm23a_DynBBPSInit(struct dm_odm_t *pDM_Odm)
 	pDM_PSTable->initialize = 0;
 }
 
-void odm_DynamicBBPowerSaving23a(struct dm_odm_t *pDM_Odm)
-{
-	return;
-}
 
 void ODM_RF_Saving23a(struct dm_odm_t *pDM_Odm, u8 bForceInNormal)
 {
@@ -985,7 +979,7 @@ void ODM_RF_Saving23a(struct dm_odm_t *pDM_Odm, u8 bForceInNormal)
 			val32 = rtl8723au_read32(adapter, 0x874);
 			val32 |= pDM_PSTable->Reg874;
 			rtl8723au_write32(adapter, 0x874, val32);
-		
+
 			val32 = rtl8723au_read32(adapter, 0xc70);
 			val32 |= pDM_PSTable->RegC70;
 			rtl8723au_write32(adapter, 0xc70, val32);
@@ -1274,7 +1268,7 @@ static void odm_RSSIMonitorCheck(struct dm_odm_t *pDM_Odm)
 
 	for (i = 0; i < sta_cnt; i++) {
 		if (PWDB_rssi[i] != (0))
-			rtl8723a_set_rssi_cmd(Adapter, (u8 *)&PWDB_rssi[i]);
+			rtl8723a_set_rssi_cmd(Adapter, PWDB_rssi[i]);
 	}
 
 	pdmpriv->EntryMaxUndecoratedSmoothedPWDB = MaxDB;

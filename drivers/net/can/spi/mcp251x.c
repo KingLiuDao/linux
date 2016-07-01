@@ -843,7 +843,7 @@ static irqreturn_t mcp251x_can_ist(int irq, void *dev_id)
 		if (clear_intf)
 			mcp251x_write_bits(spi, CANINTF, clear_intf, 0x00);
 
-		if (eflag)
+		if (eflag & (EFLG_RX0OVR | EFLG_RX1OVR))
 			mcp251x_write_bits(spi, EFLG, eflag, 0x00);
 
 		/* Update can state */
@@ -961,7 +961,8 @@ static int mcp251x_open(struct net_device *net)
 		goto open_unlock;
 	}
 
-	priv->wq = create_freezable_workqueue("mcp251x_wq");
+	priv->wq = alloc_workqueue("mcp251x_wq", WQ_FREEZABLE | WQ_MEM_RECLAIM,
+				   0);
 	INIT_WORK(&priv->tx_work, mcp251x_tx_work_handler);
 	INIT_WORK(&priv->restart_work, mcp251x_restart_work_handler);
 
@@ -1086,8 +1087,8 @@ static int mcp251x_can_probe(struct spi_device *spi)
 	if (ret)
 		goto out_clk;
 
-	priv->power = devm_regulator_get(&spi->dev, "vdd");
-	priv->transceiver = devm_regulator_get(&spi->dev, "xceiver");
+	priv->power = devm_regulator_get_optional(&spi->dev, "vdd");
+	priv->transceiver = devm_regulator_get_optional(&spi->dev, "xceiver");
 	if ((PTR_ERR(priv->power) == -EPROBE_DEFER) ||
 	    (PTR_ERR(priv->transceiver) == -EPROBE_DEFER)) {
 		ret = -EPROBE_DEFER;
@@ -1222,17 +1223,16 @@ static int __maybe_unused mcp251x_can_resume(struct device *dev)
 	struct spi_device *spi = to_spi_device(dev);
 	struct mcp251x_priv *priv = spi_get_drvdata(spi);
 
-	if (priv->after_suspend & AFTER_SUSPEND_POWER) {
+	if (priv->after_suspend & AFTER_SUSPEND_POWER)
 		mcp251x_power_enable(priv->power, 1);
+
+	if (priv->after_suspend & AFTER_SUSPEND_UP) {
+		mcp251x_power_enable(priv->transceiver, 1);
 		queue_work(priv->wq, &priv->restart_work);
 	} else {
-		if (priv->after_suspend & AFTER_SUSPEND_UP) {
-			mcp251x_power_enable(priv->transceiver, 1);
-			queue_work(priv->wq, &priv->restart_work);
-		} else {
-			priv->after_suspend = 0;
-		}
+		priv->after_suspend = 0;
 	}
+
 	priv->force_quit = 0;
 	enable_irq(spi->irq);
 	return 0;
@@ -1244,7 +1244,6 @@ static SIMPLE_DEV_PM_OPS(mcp251x_can_pm_ops, mcp251x_can_suspend,
 static struct spi_driver mcp251x_can_driver = {
 	.driver = {
 		.name = DEVICE_NAME,
-		.owner = THIS_MODULE,
 		.of_match_table = mcp251x_of_match,
 		.pm = &mcp251x_can_pm_ops,
 	},

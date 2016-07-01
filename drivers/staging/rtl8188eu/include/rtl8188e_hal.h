@@ -11,11 +11,6 @@
  * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
  * more details.
  *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110, USA
- *
- *
  ******************************************************************************/
 #ifndef __RTL8188E_HAL_H__
 #define __RTL8188E_HAL_H__
@@ -188,18 +183,9 @@ struct txpowerinfo24g {
 
 #define EFUSE_PROTECT_BYTES_BANK	16
 
-/*  For RTL8723 regulator mode. */
-enum rt_regulator_mode {
-	RT_SWITCHING_REGULATOR = 0,
-	RT_LDO_REGULATOR = 1,
-};
-
 struct hal_data_8188e {
 	struct HAL_VERSION	VersionID;
-	enum rt_regulator_mode RegulatorMode; /*  switching regulator or LDO */
 	u16	CustomerID;
-	u8 *pfirmware;
-	u32 fwsize;
 	u16	FirmwareVersion;
 	u16	FirmwareVersionRev;
 	u16	FirmwareSubVersion;
@@ -301,7 +287,6 @@ struct hal_data_8188e {
 	/* for host message to fw */
 	u8	LastHMEBoxNum;
 
-	u8	fw_ractrl;
 	u8	RegTxPause;
 	/*  Beacon function related global variable. */
 	u32	RegBcnCtrlVal;

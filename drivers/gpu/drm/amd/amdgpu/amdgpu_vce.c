@@ -41,13 +41,17 @@
 /* Firmware Names */
 #ifdef CONFIG_DRM_AMDGPU_CIK
 #define FIRMWARE_BONAIRE	"radeon/bonaire_vce.bin"
-#define FIRMWARE_KABINI 	"radeon/kabini_vce.bin"
-#define FIRMWARE_KAVERI 	"radeon/kaveri_vce.bin"
-#define FIRMWARE_HAWAII 	"radeon/hawaii_vce.bin"
+#define FIRMWARE_KABINI	"radeon/kabini_vce.bin"
+#define FIRMWARE_KAVERI	"radeon/kaveri_vce.bin"
+#define FIRMWARE_HAWAII	"radeon/hawaii_vce.bin"
 #define FIRMWARE_MULLINS	"radeon/mullins_vce.bin"
 #endif
 #define FIRMWARE_TONGA		"amdgpu/tonga_vce.bin"
 #define FIRMWARE_CARRIZO	"amdgpu/carrizo_vce.bin"
+#define FIRMWARE_FIJI		"amdgpu/fiji_vce.bin"
+#define FIRMWARE_STONEY		"amdgpu/stoney_vce.bin"
+#define FIRMWARE_POLARIS10	"amdgpu/polaris10_vce.bin"
+#define FIRMWARE_POLARIS11         "amdgpu/polaris11_vce.bin"
 
 #ifdef CONFIG_DRM_AMDGPU_CIK
 MODULE_FIRMWARE(FIRMWARE_BONAIRE);
@@ -58,6 +62,10 @@ MODULE_FIRMWARE(FIRMWARE_MULLINS);
 #endif
 MODULE_FIRMWARE(FIRMWARE_TONGA);
 MODULE_FIRMWARE(FIRMWARE_CARRIZO);
+MODULE_FIRMWARE(FIRMWARE_FIJI);
+MODULE_FIRMWARE(FIRMWARE_STONEY);
+MODULE_FIRMWARE(FIRMWARE_POLARIS10);
+MODULE_FIRMWARE(FIRMWARE_POLARIS11);
 
 static void amdgpu_vce_idle_work_handler(struct work_struct *work);
 
@@ -70,6 +78,8 @@ static void amdgpu_vce_idle_work_handler(struct work_struct *work);
  */
 int amdgpu_vce_sw_init(struct amdgpu_device *adev, unsigned long size)
 {
+	struct amdgpu_ring *ring;
+	struct amd_sched_rq *rq;
 	const char *fw_name;
 	const struct common_firmware_header *hdr;
 	unsigned ucode_version, version_major, version_minor, binary_id;
@@ -100,6 +110,18 @@ int amdgpu_vce_sw_init(struct amdgpu_device *adev, unsigned long size)
 		break;
 	case CHIP_CARRIZO:
 		fw_name = FIRMWARE_CARRIZO;
+		break;
+	case CHIP_FIJI:
+		fw_name = FIRMWARE_FIJI;
+		break;
+	case CHIP_STONEY:
+		fw_name = FIRMWARE_STONEY;
+		break;
+	case CHIP_POLARIS10:
+		fw_name = FIRMWARE_POLARIS10;
+		break;
+	case CHIP_POLARIS11:
+		fw_name = FIRMWARE_POLARIS11;
 		break;
 
 	default:
@@ -136,7 +158,9 @@ int amdgpu_vce_sw_init(struct amdgpu_device *adev, unsigned long size)
 	/* allocate firmware, stack and heap BO */
 
 	r = amdgpu_bo_create(adev, size, PAGE_SIZE, true,
-			     AMDGPU_GEM_DOMAIN_VRAM, 0, NULL, &adev->vce.vcpu_bo);
+			     AMDGPU_GEM_DOMAIN_VRAM,
+			     AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED,
+			     NULL, NULL, &adev->vce.vcpu_bo);
 	if (r) {
 		dev_err(adev->dev, "(%d) failed to allocate VCE bo\n", r);
 		return r;
@@ -155,6 +179,16 @@ int amdgpu_vce_sw_init(struct amdgpu_device *adev, unsigned long size)
 	if (r) {
 		amdgpu_bo_unref(&adev->vce.vcpu_bo);
 		dev_err(adev->dev, "(%d) VCE bo pin failed\n", r);
+		return r;
+	}
+
+
+	ring = &adev->vce.ring[0];
+	rq = &ring->sched.sched_rq[AMD_SCHED_PRIORITY_NORMAL];
+	r = amd_sched_entity_init(&ring->sched, &adev->vce.entity,
+				  rq, amdgpu_sched_jobs);
+	if (r != 0) {
+		DRM_ERROR("Failed setting up VCE run queue.\n");
 		return r;
 	}
 
@@ -177,6 +211,8 @@ int amdgpu_vce_sw_fini(struct amdgpu_device *adev)
 {
 	if (adev->vce.vcpu_bo == NULL)
 		return 0;
+
+	amd_sched_entity_fini(&adev->vce.ring[0].sched, &adev->vce.entity);
 
 	amdgpu_bo_unref(&adev->vce.vcpu_bo);
 
@@ -208,6 +244,7 @@ int amdgpu_vce_suspend(struct amdgpu_device *adev)
 	if (i == AMDGPU_MAX_VCE_HANDLES)
 		return 0;
 
+	cancel_delayed_work_sync(&adev->vce.idle_work);
 	/* TODO: suspending running encoding sessions isn't supported */
 	return -EINVAL;
 }
@@ -325,7 +362,7 @@ void amdgpu_vce_free_handles(struct amdgpu_device *adev, struct drm_file *filp)
 
 		amdgpu_vce_note_usage(adev);
 
-		r = amdgpu_vce_get_destroy_msg(ring, handle, NULL);
+		r = amdgpu_vce_get_destroy_msg(ring, handle, false, NULL);
 		if (r)
 			DRM_ERROR("Error destroying VCE handle (%d)!\n", r);
 
@@ -345,59 +382,73 @@ void amdgpu_vce_free_handles(struct amdgpu_device *adev, struct drm_file *filp)
  * Open up a stream for HW test
  */
 int amdgpu_vce_get_create_msg(struct amdgpu_ring *ring, uint32_t handle,
-			      struct amdgpu_fence **fence)
+			      struct fence **fence)
 {
 	const unsigned ib_size_dw = 1024;
-	struct amdgpu_ib ib;
+	struct amdgpu_job *job;
+	struct amdgpu_ib *ib;
+	struct fence *f = NULL;
 	uint64_t dummy;
 	int i, r;
 
-	r = amdgpu_ib_get(ring, NULL, ib_size_dw * 4, &ib);
-	if (r) {
-		DRM_ERROR("amdgpu: failed to get ib (%d).\n", r);
+	r = amdgpu_job_alloc_with_ib(ring->adev, ib_size_dw * 4, &job);
+	if (r)
 		return r;
-	}
 
-	dummy = ib.gpu_addr + 1024;
+	ib = &job->ibs[0];
+
+	dummy = ib->gpu_addr + 1024;
 
 	/* stitch together an VCE create msg */
-	ib.length_dw = 0;
-	ib.ptr[ib.length_dw++] = 0x0000000c; /* len */
-	ib.ptr[ib.length_dw++] = 0x00000001; /* session cmd */
-	ib.ptr[ib.length_dw++] = handle;
+	ib->length_dw = 0;
+	ib->ptr[ib->length_dw++] = 0x0000000c; /* len */
+	ib->ptr[ib->length_dw++] = 0x00000001; /* session cmd */
+	ib->ptr[ib->length_dw++] = handle;
 
-	ib.ptr[ib.length_dw++] = 0x00000030; /* len */
-	ib.ptr[ib.length_dw++] = 0x01000001; /* create cmd */
-	ib.ptr[ib.length_dw++] = 0x00000000;
-	ib.ptr[ib.length_dw++] = 0x00000042;
-	ib.ptr[ib.length_dw++] = 0x0000000a;
-	ib.ptr[ib.length_dw++] = 0x00000001;
-	ib.ptr[ib.length_dw++] = 0x00000080;
-	ib.ptr[ib.length_dw++] = 0x00000060;
-	ib.ptr[ib.length_dw++] = 0x00000100;
-	ib.ptr[ib.length_dw++] = 0x00000100;
-	ib.ptr[ib.length_dw++] = 0x0000000c;
-	ib.ptr[ib.length_dw++] = 0x00000000;
-
-	ib.ptr[ib.length_dw++] = 0x00000014; /* len */
-	ib.ptr[ib.length_dw++] = 0x05000005; /* feedback buffer */
-	ib.ptr[ib.length_dw++] = upper_32_bits(dummy);
-	ib.ptr[ib.length_dw++] = dummy;
-	ib.ptr[ib.length_dw++] = 0x00000001;
-
-	for (i = ib.length_dw; i < ib_size_dw; ++i)
-		ib.ptr[i] = 0x0;
-
-	r = amdgpu_ib_schedule(ring->adev, 1, &ib, AMDGPU_FENCE_OWNER_UNDEFINED);
-	if (r) {
-		DRM_ERROR("amdgpu: failed to schedule ib (%d).\n", r);
+	if ((ring->adev->vce.fw_version >> 24) >= 52)
+		ib->ptr[ib->length_dw++] = 0x00000040; /* len */
+	else
+		ib->ptr[ib->length_dw++] = 0x00000030; /* len */
+	ib->ptr[ib->length_dw++] = 0x01000001; /* create cmd */
+	ib->ptr[ib->length_dw++] = 0x00000000;
+	ib->ptr[ib->length_dw++] = 0x00000042;
+	ib->ptr[ib->length_dw++] = 0x0000000a;
+	ib->ptr[ib->length_dw++] = 0x00000001;
+	ib->ptr[ib->length_dw++] = 0x00000080;
+	ib->ptr[ib->length_dw++] = 0x00000060;
+	ib->ptr[ib->length_dw++] = 0x00000100;
+	ib->ptr[ib->length_dw++] = 0x00000100;
+	ib->ptr[ib->length_dw++] = 0x0000000c;
+	ib->ptr[ib->length_dw++] = 0x00000000;
+	if ((ring->adev->vce.fw_version >> 24) >= 52) {
+		ib->ptr[ib->length_dw++] = 0x00000000;
+		ib->ptr[ib->length_dw++] = 0x00000000;
+		ib->ptr[ib->length_dw++] = 0x00000000;
+		ib->ptr[ib->length_dw++] = 0x00000000;
 	}
 
+	ib->ptr[ib->length_dw++] = 0x00000014; /* len */
+	ib->ptr[ib->length_dw++] = 0x05000005; /* feedback buffer */
+	ib->ptr[ib->length_dw++] = upper_32_bits(dummy);
+	ib->ptr[ib->length_dw++] = dummy;
+	ib->ptr[ib->length_dw++] = 0x00000001;
+
+	for (i = ib->length_dw; i < ib_size_dw; ++i)
+		ib->ptr[i] = 0x0;
+
+	r = amdgpu_ib_schedule(ring, 1, ib, NULL, NULL, &f);
+	job->fence = f;
+	if (r)
+		goto err;
+
+	amdgpu_job_free(job);
 	if (fence)
-		*fence = amdgpu_fence_ref(ib.fence);
+		*fence = fence_get(f);
+	fence_put(f);
+	return 0;
 
-	amdgpu_ib_free(ring->adev, &ib);
-
+err:
+	amdgpu_job_free(job);
 	return r;
 }
 
@@ -412,49 +463,61 @@ int amdgpu_vce_get_create_msg(struct amdgpu_ring *ring, uint32_t handle,
  * Close up a stream for HW test or if userspace failed to do so
  */
 int amdgpu_vce_get_destroy_msg(struct amdgpu_ring *ring, uint32_t handle,
-			       struct amdgpu_fence **fence)
+			       bool direct, struct fence **fence)
 {
 	const unsigned ib_size_dw = 1024;
-	struct amdgpu_ib ib;
+	struct amdgpu_job *job;
+	struct amdgpu_ib *ib;
+	struct fence *f = NULL;
 	uint64_t dummy;
 	int i, r;
 
-	r = amdgpu_ib_get(ring, NULL, ib_size_dw * 4, &ib);
-	if (r) {
-		DRM_ERROR("amdgpu: failed to get ib (%d).\n", r);
+	r = amdgpu_job_alloc_with_ib(ring->adev, ib_size_dw * 4, &job);
+	if (r)
 		return r;
-	}
 
-	dummy = ib.gpu_addr + 1024;
+	ib = &job->ibs[0];
+	dummy = ib->gpu_addr + 1024;
 
 	/* stitch together an VCE destroy msg */
-	ib.length_dw = 0;
-	ib.ptr[ib.length_dw++] = 0x0000000c; /* len */
-	ib.ptr[ib.length_dw++] = 0x00000001; /* session cmd */
-	ib.ptr[ib.length_dw++] = handle;
+	ib->length_dw = 0;
+	ib->ptr[ib->length_dw++] = 0x0000000c; /* len */
+	ib->ptr[ib->length_dw++] = 0x00000001; /* session cmd */
+	ib->ptr[ib->length_dw++] = handle;
 
-	ib.ptr[ib.length_dw++] = 0x00000014; /* len */
-	ib.ptr[ib.length_dw++] = 0x05000005; /* feedback buffer */
-	ib.ptr[ib.length_dw++] = upper_32_bits(dummy);
-	ib.ptr[ib.length_dw++] = dummy;
-	ib.ptr[ib.length_dw++] = 0x00000001;
+	ib->ptr[ib->length_dw++] = 0x00000014; /* len */
+	ib->ptr[ib->length_dw++] = 0x05000005; /* feedback buffer */
+	ib->ptr[ib->length_dw++] = upper_32_bits(dummy);
+	ib->ptr[ib->length_dw++] = dummy;
+	ib->ptr[ib->length_dw++] = 0x00000001;
 
-	ib.ptr[ib.length_dw++] = 0x00000008; /* len */
-	ib.ptr[ib.length_dw++] = 0x02000001; /* destroy cmd */
+	ib->ptr[ib->length_dw++] = 0x00000008; /* len */
+	ib->ptr[ib->length_dw++] = 0x02000001; /* destroy cmd */
 
-	for (i = ib.length_dw; i < ib_size_dw; ++i)
-		ib.ptr[i] = 0x0;
+	for (i = ib->length_dw; i < ib_size_dw; ++i)
+		ib->ptr[i] = 0x0;
 
-	r = amdgpu_ib_schedule(ring->adev, 1, &ib, AMDGPU_FENCE_OWNER_UNDEFINED);
-	if (r) {
-		DRM_ERROR("amdgpu: failed to schedule ib (%d).\n", r);
+	if (direct) {
+		r = amdgpu_ib_schedule(ring, 1, ib, NULL, NULL, &f);
+		job->fence = f;
+		if (r)
+			goto err;
+
+		amdgpu_job_free(job);
+	} else {
+		r = amdgpu_job_submit(job, ring, &ring->adev->vce.entity,
+				      AMDGPU_FENCE_OWNER_UNDEFINED, &f);
+		if (r)
+			goto err;
 	}
 
 	if (fence)
-		*fence = amdgpu_fence_ref(ib.fence);
+		*fence = fence_get(f);
+	fence_put(f);
+	return 0;
 
-	amdgpu_ib_free(ring->adev, &ib);
-
+err:
+	amdgpu_job_free(job);
 	return r;
 }
 
@@ -464,33 +527,88 @@ int amdgpu_vce_get_destroy_msg(struct amdgpu_ring *ring, uint32_t handle,
  * @p: parser context
  * @lo: address of lower dword
  * @hi: address of higher dword
+ * @size: minimum size
  *
  * Patch relocation inside command stream with real buffer address
  */
-int amdgpu_vce_cs_reloc(struct amdgpu_cs_parser *p, uint32_t ib_idx, int lo, int hi)
+static int amdgpu_vce_cs_reloc(struct amdgpu_cs_parser *p, uint32_t ib_idx,
+			       int lo, int hi, unsigned size, uint32_t index)
 {
 	struct amdgpu_bo_va_mapping *mapping;
-	struct amdgpu_ib *ib = &p->ibs[ib_idx];
 	struct amdgpu_bo *bo;
 	uint64_t addr;
 
+	if (index == 0xffffffff)
+		index = 0;
+
 	addr = ((uint64_t)amdgpu_get_ib_value(p, ib_idx, lo)) |
 	       ((uint64_t)amdgpu_get_ib_value(p, ib_idx, hi)) << 32;
+	addr += ((uint64_t)size) * ((uint64_t)index);
 
 	mapping = amdgpu_cs_find_mapping(p, addr, &bo);
 	if (mapping == NULL) {
-		DRM_ERROR("Can't find BO for addr 0x%010Lx %d %d\n",
+		DRM_ERROR("Can't find BO for addr 0x%010Lx %d %d %d %d\n",
+			  addr, lo, hi, size, index);
+		return -EINVAL;
+	}
+
+	if ((addr + (uint64_t)size) >
+	    ((uint64_t)mapping->it.last + 1) * AMDGPU_GPU_PAGE_SIZE) {
+		DRM_ERROR("BO to small for addr 0x%010Lx %d %d\n",
 			  addr, lo, hi);
 		return -EINVAL;
 	}
 
 	addr -= ((uint64_t)mapping->it.start) * AMDGPU_GPU_PAGE_SIZE;
 	addr += amdgpu_bo_gpu_offset(bo);
+	addr -= ((uint64_t)size) * ((uint64_t)index);
 
-	ib->ptr[lo] = addr & 0xFFFFFFFF;
-	ib->ptr[hi] = addr >> 32;
+	amdgpu_set_ib_value(p, ib_idx, lo, lower_32_bits(addr));
+	amdgpu_set_ib_value(p, ib_idx, hi, upper_32_bits(addr));
 
 	return 0;
+}
+
+/**
+ * amdgpu_vce_validate_handle - validate stream handle
+ *
+ * @p: parser context
+ * @handle: handle to validate
+ * @allocated: allocated a new handle?
+ *
+ * Validates the handle and return the found session index or -EINVAL
+ * we we don't have another free session index.
+ */
+static int amdgpu_vce_validate_handle(struct amdgpu_cs_parser *p,
+				      uint32_t handle, bool *allocated)
+{
+	unsigned i;
+
+	*allocated = false;
+
+	/* validate the handle */
+	for (i = 0; i < AMDGPU_MAX_VCE_HANDLES; ++i) {
+		if (atomic_read(&p->adev->vce.handles[i]) == handle) {
+			if (p->adev->vce.filp[i] != p->filp) {
+				DRM_ERROR("VCE handle collision detected!\n");
+				return -EINVAL;
+			}
+			return i;
+		}
+	}
+
+	/* handle not found try to alloc a new one */
+	for (i = 0; i < AMDGPU_MAX_VCE_HANDLES; ++i) {
+		if (!atomic_cmpxchg(&p->adev->vce.handles[i], 0, handle)) {
+			p->adev->vce.filp[i] = p->filp;
+			p->adev->vce.img_size[i] = 0;
+			*allocated = true;
+			return i;
+		}
+	}
+
+	DRM_ERROR("No more free VCE handles!\n");
+	return -EINVAL;
 }
 
 /**
@@ -501,10 +619,15 @@ int amdgpu_vce_cs_reloc(struct amdgpu_cs_parser *p, uint32_t ib_idx, int lo, int
  */
 int amdgpu_vce_ring_parse_cs(struct amdgpu_cs_parser *p, uint32_t ib_idx)
 {
-	uint32_t handle = 0;
-	bool destroy = false;
-	int i, r, idx = 0;
-	struct amdgpu_ib *ib = &p->ibs[ib_idx];
+	struct amdgpu_ib *ib = &p->job->ibs[ib_idx];
+	unsigned fb_idx = 0, bs_idx = 0;
+	int session_idx = -1;
+	bool destroyed = false;
+	bool created = false;
+	bool allocated = false;
+	uint32_t tmp, handle = 0;
+	uint32_t *size = &tmp;
+	int i, r = 0, idx = 0;
 
 	amdgpu_vce_note_usage(p->adev);
 
@@ -514,16 +637,44 @@ int amdgpu_vce_ring_parse_cs(struct amdgpu_cs_parser *p, uint32_t ib_idx)
 
 		if ((len < 8) || (len & 3)) {
 			DRM_ERROR("invalid VCE command length (%d)!\n", len);
-			return -EINVAL;
+			r = -EINVAL;
+			goto out;
+		}
+
+		if (destroyed) {
+			DRM_ERROR("No other command allowed after destroy!\n");
+			r = -EINVAL;
+			goto out;
 		}
 
 		switch (cmd) {
 		case 0x00000001: // session
 			handle = amdgpu_get_ib_value(p, ib_idx, idx + 2);
+			session_idx = amdgpu_vce_validate_handle(p, handle,
+								 &allocated);
+			if (session_idx < 0)
+				return session_idx;
+			size = &p->adev->vce.img_size[session_idx];
 			break;
 
 		case 0x00000002: // task info
+			fb_idx = amdgpu_get_ib_value(p, ib_idx, idx + 6);
+			bs_idx = amdgpu_get_ib_value(p, ib_idx, idx + 7);
+			break;
+
 		case 0x01000001: // create
+			created = true;
+			if (!allocated) {
+				DRM_ERROR("Handle already in use!\n");
+				r = -EINVAL;
+				goto out;
+			}
+
+			*size = amdgpu_get_ib_value(p, ib_idx, idx + 8) *
+				amdgpu_get_ib_value(p, ib_idx, idx + 10) *
+				8 * 3 / 2;
+			break;
+
 		case 0x04000001: // config extension
 		case 0x04000002: // pic control
 		case 0x04000005: // rate control
@@ -534,84 +685,74 @@ int amdgpu_vce_ring_parse_cs(struct amdgpu_cs_parser *p, uint32_t ib_idx)
 			break;
 
 		case 0x03000001: // encode
-			r = amdgpu_vce_cs_reloc(p, ib_idx, idx + 10, idx + 9);
+			r = amdgpu_vce_cs_reloc(p, ib_idx, idx + 10, idx + 9,
+						*size, 0);
 			if (r)
-				return r;
+				goto out;
 
-			r = amdgpu_vce_cs_reloc(p, ib_idx, idx + 12, idx + 11);
+			r = amdgpu_vce_cs_reloc(p, ib_idx, idx + 12, idx + 11,
+						*size / 3, 0);
 			if (r)
-				return r;
+				goto out;
 			break;
 
 		case 0x02000001: // destroy
-			destroy = true;
+			destroyed = true;
 			break;
 
 		case 0x05000001: // context buffer
-		case 0x05000004: // video bitstream buffer
-		case 0x05000005: // feedback buffer
-			r = amdgpu_vce_cs_reloc(p, ib_idx, idx + 3, idx + 2);
+			r = amdgpu_vce_cs_reloc(p, ib_idx, idx + 3, idx + 2,
+						*size * 2, 0);
 			if (r)
-				return r;
+				goto out;
+			break;
+
+		case 0x05000004: // video bitstream buffer
+			tmp = amdgpu_get_ib_value(p, ib_idx, idx + 4);
+			r = amdgpu_vce_cs_reloc(p, ib_idx, idx + 3, idx + 2,
+						tmp, bs_idx);
+			if (r)
+				goto out;
+			break;
+
+		case 0x05000005: // feedback buffer
+			r = amdgpu_vce_cs_reloc(p, ib_idx, idx + 3, idx + 2,
+						4096, fb_idx);
+			if (r)
+				goto out;
 			break;
 
 		default:
 			DRM_ERROR("invalid VCE command (0x%x)!\n", cmd);
-			return -EINVAL;
+			r = -EINVAL;
+			goto out;
+		}
+
+		if (session_idx == -1) {
+			DRM_ERROR("no session command at start of IB\n");
+			r = -EINVAL;
+			goto out;
 		}
 
 		idx += len / 4;
 	}
 
-	if (destroy) {
-		/* IB contains a destroy msg, free the handle */
+	if (allocated && !created) {
+		DRM_ERROR("New session without create command!\n");
+		r = -ENOENT;
+	}
+
+out:
+	if ((!r && destroyed) || (r && allocated)) {
+		/*
+		 * IB contains a destroy msg or we have allocated an
+		 * handle and got an error, anyway free the handle
+		 */
 		for (i = 0; i < AMDGPU_MAX_VCE_HANDLES; ++i)
 			atomic_cmpxchg(&p->adev->vce.handles[i], handle, 0);
-
-		return 0;
 	}
 
-	/* create or encode, validate the handle */
-	for (i = 0; i < AMDGPU_MAX_VCE_HANDLES; ++i) {
-		if (atomic_read(&p->adev->vce.handles[i]) == handle)
-			return 0;
-	}
-
-	/* handle not found try to alloc a new one */
-	for (i = 0; i < AMDGPU_MAX_VCE_HANDLES; ++i) {
-		if (!atomic_cmpxchg(&p->adev->vce.handles[i], 0, handle)) {
-			p->adev->vce.filp[i] = p->filp;
-			return 0;
-		}
-	}
-
-	DRM_ERROR("No more free VCE handles!\n");
-
-	return -EINVAL;
-}
-
-/**
- * amdgpu_vce_ring_emit_semaphore - emit a semaphore command
- *
- * @ring: engine to use
- * @semaphore: address of semaphore
- * @emit_wait: true=emit wait, false=emit signal
- *
- */
-bool amdgpu_vce_ring_emit_semaphore(struct amdgpu_ring *ring,
-				    struct amdgpu_semaphore *semaphore,
-				    bool emit_wait)
-{
-	uint64_t addr = semaphore->gpu_addr;
-
-	amdgpu_ring_write(ring, VCE_CMD_SEMAPHORE);
-	amdgpu_ring_write(ring, (addr >> 3) & 0x000FFFFF);
-	amdgpu_ring_write(ring, (addr >> 23) & 0x000FFFFF);
-	amdgpu_ring_write(ring, 0x01003000 | (emit_wait ? 1 : 0));
-	if (!emit_wait)
-		amdgpu_ring_write(ring, VCE_CMD_END);
-
-	return true;
+	return r;
 }
 
 /**
@@ -621,7 +762,8 @@ bool amdgpu_vce_ring_emit_semaphore(struct amdgpu_ring *ring,
  * @ib: the IB to execute
  *
  */
-void amdgpu_vce_ring_emit_ib(struct amdgpu_ring *ring, struct amdgpu_ib *ib)
+void amdgpu_vce_ring_emit_ib(struct amdgpu_ring *ring, struct amdgpu_ib *ib,
+			     unsigned vm_id, bool ctx_switch)
 {
 	amdgpu_ring_write(ring, VCE_CMD_IB);
 	amdgpu_ring_write(ring, lower_32_bits(ib->gpu_addr));
@@ -662,14 +804,14 @@ int amdgpu_vce_ring_test_ring(struct amdgpu_ring *ring)
 	unsigned i;
 	int r;
 
-	r = amdgpu_ring_lock(ring, 16);
+	r = amdgpu_ring_alloc(ring, 16);
 	if (r) {
 		DRM_ERROR("amdgpu: vce failed to lock ring %d (%d).\n",
 			  ring->idx, r);
 		return r;
 	}
 	amdgpu_ring_write(ring, VCE_CMD_END);
-	amdgpu_ring_unlock_commit(ring);
+	amdgpu_ring_commit(ring);
 
 	for (i = 0; i < adev->usec_timeout; i++) {
 		if (amdgpu_ring_get_rptr(ring) != rptr)
@@ -697,8 +839,12 @@ int amdgpu_vce_ring_test_ring(struct amdgpu_ring *ring)
  */
 int amdgpu_vce_ring_test_ib(struct amdgpu_ring *ring)
 {
-	struct amdgpu_fence *fence = NULL;
+	struct fence *fence = NULL;
 	int r;
+
+	/* skip vce ring1 ib test for now, since it's not reliable */
+	if (ring == &ring->adev->vce.ring[1])
+		return 0;
 
 	r = amdgpu_vce_get_create_msg(ring, 1, NULL);
 	if (r) {
@@ -706,19 +852,19 @@ int amdgpu_vce_ring_test_ib(struct amdgpu_ring *ring)
 		goto error;
 	}
 
-	r = amdgpu_vce_get_destroy_msg(ring, 1, &fence);
+	r = amdgpu_vce_get_destroy_msg(ring, 1, true, &fence);
 	if (r) {
 		DRM_ERROR("amdgpu: failed to get destroy ib (%d).\n", r);
 		goto error;
 	}
 
-	r = amdgpu_fence_wait(fence, false);
+	r = fence_wait(fence, false);
 	if (r) {
 		DRM_ERROR("amdgpu: fence wait failed (%d).\n", r);
 	} else {
 		DRM_INFO("ib test on ring %d succeeded\n", ring->idx);
 	}
 error:
-	amdgpu_fence_unref(&fence);
+	fence_put(fence);
 	return r;
 }

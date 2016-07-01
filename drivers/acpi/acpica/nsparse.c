@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2015, Intel Corp.
+ * Copyright (C) 2000 - 2016, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -47,6 +47,7 @@
 #include "acparser.h"
 #include "acdispat.h"
 #include "actables.h"
+#include "acinterp.h"
 
 #define _COMPONENT          ACPI_NAMESPACE
 ACPI_MODULE_NAME("nsparse")
@@ -70,13 +71,27 @@ acpi_ns_one_complete_parse(u32 pass_number,
 {
 	union acpi_parse_object *parse_root;
 	acpi_status status;
-       u32 aml_length;
+	u32 aml_length;
 	u8 *aml_start;
 	struct acpi_walk_state *walk_state;
 	struct acpi_table_header *table;
 	acpi_owner_id owner_id;
 
 	ACPI_FUNCTION_TRACE(ns_one_complete_parse);
+
+	status = acpi_get_table_by_index(table_index, &table);
+	if (ACPI_FAILURE(status)) {
+		return_ACPI_STATUS(status);
+	}
+
+	/* Table must consist of at least a complete header */
+
+	if (table->length < sizeof(struct acpi_table_header)) {
+		return_ACPI_STATUS(AE_BAD_HEADER);
+	}
+
+	aml_start = (u8 *)table + sizeof(struct acpi_table_header);
+	aml_length = table->length - sizeof(struct acpi_table_header);
 
 	status = acpi_tb_get_owner_id(table_index, &owner_id);
 	if (ACPI_FAILURE(status)) {
@@ -85,7 +100,7 @@ acpi_ns_one_complete_parse(u32 pass_number,
 
 	/* Create and init a Root Node */
 
-	parse_root = acpi_ps_create_scope_op();
+	parse_root = acpi_ps_create_scope_op(aml_start);
 	if (!parse_root) {
 		return_ACPI_STATUS(AE_NO_MEMORY);
 	}
@@ -98,28 +113,19 @@ acpi_ns_one_complete_parse(u32 pass_number,
 		return_ACPI_STATUS(AE_NO_MEMORY);
 	}
 
-	status = acpi_get_table_by_index(table_index, &table);
-	if (ACPI_FAILURE(status)) {
-		acpi_ds_delete_walk_state(walk_state);
-		acpi_ps_free_op(parse_root);
-		return_ACPI_STATUS(status);
-	}
-
-	/* Table must consist of at least a complete header */
-
-	if (table->length < sizeof(struct acpi_table_header)) {
-		status = AE_BAD_HEADER;
-	} else {
-		aml_start = (u8 *) table + sizeof(struct acpi_table_header);
-		aml_length = table->length - sizeof(struct acpi_table_header);
-		status = acpi_ds_init_aml_walk(walk_state, parse_root, NULL,
-					       aml_start, aml_length, NULL,
-					       (u8) pass_number);
-	}
-
+	status = acpi_ds_init_aml_walk(walk_state, parse_root, NULL,
+				       aml_start, aml_length, NULL,
+				       (u8)pass_number);
 	if (ACPI_FAILURE(status)) {
 		acpi_ds_delete_walk_state(walk_state);
 		goto cleanup;
+	}
+
+	/* Found OSDT table, enable the namespace override feature */
+
+	if (ACPI_COMPARE_NAME(table->signature, ACPI_SIG_OSDT) &&
+	    pass_number == ACPI_IMODE_LOAD_PASS1) {
+		walk_state->namespace_override = TRUE;
 	}
 
 	/* start_node is the default location to load the table */
@@ -136,8 +142,8 @@ acpi_ns_one_complete_parse(u32 pass_number,
 
 	/* Parse the AML */
 
-	ACPI_DEBUG_PRINT((ACPI_DB_PARSE, "*PARSE* pass %u parse\n",
-			  pass_number));
+	ACPI_DEBUG_PRINT((ACPI_DB_PARSE,
+			  "*PARSE* pass %u parse\n", pass_number));
 	status = acpi_ps_parse_aml(walk_state);
 
 cleanup:
@@ -165,6 +171,8 @@ acpi_ns_parse_table(u32 table_index, struct acpi_namespace_node *start_node)
 
 	ACPI_FUNCTION_TRACE(ns_parse_table);
 
+	acpi_ex_enter_interpreter();
+
 	/*
 	 * AML Parse, pass 1
 	 *
@@ -176,10 +184,11 @@ acpi_ns_parse_table(u32 table_index, struct acpi_namespace_node *start_node)
 	 * performs another complete parse of the AML.
 	 */
 	ACPI_DEBUG_PRINT((ACPI_DB_PARSE, "**** Start pass 1\n"));
+
 	status = acpi_ns_one_complete_parse(ACPI_IMODE_LOAD_PASS1,
 					    table_index, start_node);
 	if (ACPI_FAILURE(status)) {
-		return_ACPI_STATUS(status);
+		goto error_exit;
 	}
 
 	/*
@@ -195,8 +204,10 @@ acpi_ns_parse_table(u32 table_index, struct acpi_namespace_node *start_node)
 	status = acpi_ns_one_complete_parse(ACPI_IMODE_LOAD_PASS2,
 					    table_index, start_node);
 	if (ACPI_FAILURE(status)) {
-		return_ACPI_STATUS(status);
+		goto error_exit;
 	}
 
+error_exit:
+	acpi_ex_exit_interpreter();
 	return_ACPI_STATUS(status);
 }

@@ -21,6 +21,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
+#include <linux/dma-mapping.h>
 #include <linux/pm_runtime.h>
 #include <sound/soc.h>
 #include "mtk-afe-common.h"
@@ -35,9 +36,11 @@
 #define AFE_I2S_CON1		0x0034
 #define AFE_I2S_CON2		0x0038
 #define AFE_CONN_24BIT		0x006c
+#define AFE_MEMIF_MSB		0x00cc
 
 #define AFE_CONN1		0x0024
 #define AFE_CONN2		0x0028
+#define AFE_CONN3		0x002c
 #define AFE_CONN7		0x0460
 #define AFE_CONN8		0x0464
 #define AFE_HDMI_CONN0		0x0390
@@ -45,19 +48,23 @@
 /* Memory interface */
 #define AFE_DL1_BASE		0x0040
 #define AFE_DL1_CUR		0x0044
+#define AFE_DL1_END		0x0048
 #define AFE_DL2_BASE		0x0050
 #define AFE_DL2_CUR		0x0054
 #define AFE_AWB_BASE		0x0070
 #define AFE_AWB_CUR		0x007c
 #define AFE_VUL_BASE		0x0080
 #define AFE_VUL_CUR		0x008c
+#define AFE_VUL_END		0x0088
 #define AFE_DAI_BASE		0x0090
 #define AFE_DAI_CUR		0x009c
 #define AFE_MOD_PCM_BASE	0x0330
 #define AFE_MOD_PCM_CUR		0x033c
 #define AFE_HDMI_OUT_BASE	0x0374
 #define AFE_HDMI_OUT_CUR	0x0378
+#define AFE_HDMI_OUT_END	0x037c
 
+#define AFE_ADDA_TOP_CON0	0x0120
 #define AFE_ADDA2_TOP_CON0	0x0600
 
 #define AFE_HDMI_OUT_CON0	0x0370
@@ -116,6 +123,7 @@
 #define AFE_TDM_CON1_WLEN_32BIT		(0x2 << 8)
 #define AFE_TDM_CON1_MSB_ALIGNED	(0x1 << 4)
 #define AFE_TDM_CON1_1_BCK_DELAY	(0x1 << 3)
+#define AFE_TDM_CON1_LRCK_INV		(0x1 << 2)
 #define AFE_TDM_CON1_BCK_INV		(0x1 << 1)
 #define AFE_TDM_CON1_EN			(0x1 << 0)
 
@@ -125,6 +133,34 @@ enum afe_tdm_ch_start {
 	AFE_TDM_CH_START_O34_O35,
 	AFE_TDM_CH_START_O36_O37,
 	AFE_TDM_CH_ZERO,
+};
+
+static const unsigned int mtk_afe_backup_list[] = {
+	AUDIO_TOP_CON0,
+	AFE_CONN1,
+	AFE_CONN2,
+	AFE_CONN7,
+	AFE_CONN8,
+	AFE_DAC_CON1,
+	AFE_DL1_BASE,
+	AFE_DL1_END,
+	AFE_VUL_BASE,
+	AFE_VUL_END,
+	AFE_HDMI_OUT_BASE,
+	AFE_HDMI_OUT_END,
+	AFE_HDMI_CONN0,
+	AFE_DAC_CON0,
+};
+
+struct mtk_afe {
+	/* address for ioremap audio hardware register */
+	void __iomem *base_addr;
+	struct device *dev;
+	struct regmap *regmap;
+	struct mtk_afe_memif memif[MTK_AFE_MEMIF_NUM];
+	struct clk *clocks[MTK_CLK_NUM];
+	unsigned int backup_regs[ARRAY_SIZE(mtk_afe_backup_list)];
+	bool suspended;
 };
 
 static const struct snd_pcm_hardware mtk_afe_hardware = {
@@ -144,8 +180,17 @@ static snd_pcm_uframes_t mtk_afe_pcm_pointer
 	struct snd_soc_pcm_runtime *rtd = substream->private_data;
 	struct mtk_afe *afe = snd_soc_platform_get_drvdata(rtd->platform);
 	struct mtk_afe_memif *memif = &afe->memif[rtd->cpu_dai->id];
+	unsigned int hw_ptr;
+	int ret;
 
-	return bytes_to_frames(substream->runtime, memif->hw_ptr);
+	ret = regmap_read(afe->regmap, memif->data->reg_ofs_cur, &hw_ptr);
+	if (ret || hw_ptr == 0) {
+		dev_err(afe->dev, "%s hw_ptr err\n", __func__);
+		hw_ptr = memif->phys_buf_addr;
+	}
+
+	return bytes_to_frames(substream->runtime,
+			       hw_ptr - memif->phys_buf_addr);
 }
 
 static const struct snd_pcm_ops mtk_afe_pcm_ops = {
@@ -217,6 +262,7 @@ static int mtk_afe_set_i2s(struct mtk_afe *afe, unsigned int rate)
 		return -EINVAL;
 
 	/* from external ADC */
+	regmap_update_bits(afe->regmap, AFE_ADDA_TOP_CON0, 0x1, 0x1);
 	regmap_update_bits(afe->regmap, AFE_ADDA2_TOP_CON0, 0x1, 0x1);
 
 	/* set input */
@@ -241,20 +287,13 @@ static void mtk_afe_set_i2s_enable(struct mtk_afe *afe, bool enable)
 
 	regmap_read(afe->regmap, AFE_I2S_CON2, &val);
 	if (!!(val & AFE_I2S_CON2_EN) == enable)
-		return; /* must skip soft reset */
-
-	/* I2S soft reset begin */
-	regmap_update_bits(afe->regmap, AUDIO_TOP_CON1, 0x4, 0x4);
+		return;
 
 	/* input */
 	regmap_update_bits(afe->regmap, AFE_I2S_CON2, 0x1, enable);
 
 	/* output */
 	regmap_update_bits(afe->regmap, AFE_I2S_CON1, 0x1, enable);
-
-	/* I2S soft reset end */
-	udelay(1);
-	regmap_update_bits(afe->regmap, AUDIO_TOP_CON1, 0x4, 0);
 }
 
 static int mtk_afe_dais_enable_clks(struct mtk_afe *afe,
@@ -268,8 +307,6 @@ static int mtk_afe_dais_enable_clks(struct mtk_afe *afe,
 			dev_err(afe->dev, "Failed to enable m_ck\n");
 			return ret;
 		}
-		regmap_update_bits(afe->regmap, AUDIO_TOP_CON0,
-				   AUD_TCON0_PDN_22M | AUD_TCON0_PDN_24M, 0);
 	}
 
 	if (b_ck) {
@@ -309,12 +346,8 @@ static int mtk_afe_dais_set_clks(struct mtk_afe *afe,
 static void mtk_afe_dais_disable_clks(struct mtk_afe *afe,
 				      struct clk *m_ck, struct clk *b_ck)
 {
-	if (m_ck) {
-		regmap_update_bits(afe->regmap, AUDIO_TOP_CON0,
-				   AUD_TCON0_PDN_22M | AUD_TCON0_PDN_24M,
-				   AUD_TCON0_PDN_22M | AUD_TCON0_PDN_24M);
+	if (m_ck)
 		clk_disable_unprepare(m_ck);
-	}
 	if (b_ck)
 		clk_disable_unprepare(b_ck);
 }
@@ -329,6 +362,9 @@ static int mtk_afe_i2s_startup(struct snd_pcm_substream *substream,
 		return 0;
 
 	mtk_afe_dais_enable_clks(afe, afe->clocks[MTK_CLK_I2S1_M], NULL);
+	mtk_afe_dais_enable_clks(afe, afe->clocks[MTK_CLK_I2S2_M], NULL);
+	regmap_update_bits(afe->regmap, AUDIO_TOP_CON0,
+			   AUD_TCON0_PDN_22M | AUD_TCON0_PDN_24M, 0);
 	return 0;
 }
 
@@ -342,10 +378,11 @@ static void mtk_afe_i2s_shutdown(struct snd_pcm_substream *substream,
 		return;
 
 	mtk_afe_set_i2s_enable(afe, false);
+	regmap_update_bits(afe->regmap, AUDIO_TOP_CON0,
+			   AUD_TCON0_PDN_22M | AUD_TCON0_PDN_24M,
+			   AUD_TCON0_PDN_22M | AUD_TCON0_PDN_24M);
 	mtk_afe_dais_disable_clks(afe, afe->clocks[MTK_CLK_I2S1_M], NULL);
-
-	/* disable AFE */
-	regmap_update_bits(afe->regmap, AFE_DAC_CON0, 0x1, 0);
+	mtk_afe_dais_disable_clks(afe, afe->clocks[MTK_CLK_I2S2_M], NULL);
 }
 
 static int mtk_afe_i2s_prepare(struct snd_pcm_substream *substream,
@@ -358,6 +395,9 @@ static int mtk_afe_i2s_prepare(struct snd_pcm_substream *substream,
 
 	mtk_afe_dais_set_clks(afe,
 			      afe->clocks[MTK_CLK_I2S1_M], runtime->rate * 256,
+			      NULL, 0);
+	mtk_afe_dais_set_clks(afe,
+			      afe->clocks[MTK_CLK_I2S2_M], runtime->rate * 256,
 			      NULL, 0);
 	/* config I2S */
 	ret = mtk_afe_set_i2s(afe, substream->runtime->rate);
@@ -394,9 +434,6 @@ static void mtk_afe_hdmi_shutdown(struct snd_pcm_substream *substream,
 
 	mtk_afe_dais_disable_clks(afe, afe->clocks[MTK_CLK_I2S3_M],
 				  afe->clocks[MTK_CLK_I2S3_B]);
-
-	/* disable AFE */
-	regmap_update_bits(afe->regmap, AFE_DAC_CON0, 0x1, 0);
 }
 
 static int mtk_afe_hdmi_prepare(struct snd_pcm_substream *substream,
@@ -413,6 +450,7 @@ static int mtk_afe_hdmi_prepare(struct snd_pcm_substream *substream,
 			      runtime->rate * runtime->channels * 32);
 
 	val = AFE_TDM_CON1_BCK_INV |
+	      AFE_TDM_CON1_LRCK_INV |
 	      AFE_TDM_CON1_1_BCK_DELAY |
 	      AFE_TDM_CON1_MSB_ALIGNED | /* I2S mode */
 	      AFE_TDM_CON1_WLEN_32BIT |
@@ -518,6 +556,23 @@ static int mtk_afe_dais_startup(struct snd_pcm_substream *substream,
 	memif->substream = substream;
 
 	snd_soc_set_runtime_hwparams(substream, &mtk_afe_hardware);
+
+	/*
+	 * Capture cannot use ping-pong buffer since hw_ptr at IRQ may be
+	 * smaller than period_size due to AFE's internal buffer.
+	 * This easily leads to overrun when avail_min is period_size.
+	 * One more period can hold the possible unread buffer.
+	 */
+	if (substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
+		ret = snd_pcm_hw_constraint_minmax(runtime,
+						   SNDRV_PCM_HW_PARAM_PERIODS,
+						   3,
+						   mtk_afe_hardware.periods_max);
+		if (ret < 0) {
+			dev_err(afe->dev, "hw_constraint_minmax failed\n");
+			return ret;
+		}
+	}
 	ret = snd_pcm_hw_constraint_integer(runtime,
 					    SNDRV_PCM_HW_PARAM_PERIODS);
 	if (ret < 0)
@@ -542,6 +597,7 @@ static int mtk_afe_dais_hw_params(struct snd_pcm_substream *substream,
 	struct snd_soc_pcm_runtime *rtd = substream->private_data;
 	struct mtk_afe *afe = snd_soc_platform_get_drvdata(rtd->platform);
 	struct mtk_afe_memif *memif = &afe->memif[rtd->cpu_dai->id];
+	int msb_at_bit33 = 0;
 	int ret;
 
 	dev_dbg(afe->dev,
@@ -553,9 +609,9 @@ static int mtk_afe_dais_hw_params(struct snd_pcm_substream *substream,
 	if (ret < 0)
 		return ret;
 
-	memif->phys_buf_addr = substream->runtime->dma_addr;
+	msb_at_bit33 = upper_32_bits(substream->runtime->dma_addr) ? 1 : 0;
+	memif->phys_buf_addr = lower_32_bits(substream->runtime->dma_addr);
 	memif->buffer_size = substream->runtime->dma_bytes;
-	memif->hw_ptr = 0;
 
 	/* start */
 	regmap_write(afe->regmap,
@@ -564,6 +620,11 @@ static int mtk_afe_dais_hw_params(struct snd_pcm_substream *substream,
 	regmap_write(afe->regmap,
 		     memif->data->reg_ofs_base + AFE_BASE_END_OFFSET,
 		     memif->phys_buf_addr + memif->buffer_size - 1);
+
+	/* set MSB to 33-bit */
+	regmap_update_bits(afe->regmap, AFE_MEMIF_MSB,
+			   1 << memif->data->msb_shift,
+			   msb_at_bit33 << memif->data->msb_shift);
 
 	/* set channel */
 	if (memif->data->mono_shift >= 0) {
@@ -624,17 +685,6 @@ static int mtk_afe_dais_hw_free(struct snd_pcm_substream *substream,
 	return snd_pcm_lib_free_pages(substream);
 }
 
-static int mtk_afe_dais_prepare(struct snd_pcm_substream *substream,
-				struct snd_soc_dai *dai)
-{
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
-	struct mtk_afe *afe = snd_soc_platform_get_drvdata(rtd->platform);
-
-	/* enable AFE */
-	regmap_update_bits(afe->regmap, AFE_DAC_CON0, 0x1, 0x1);
-	return 0;
-}
-
 static int mtk_afe_dais_trigger(struct snd_pcm_substream *substream, int cmd,
 				struct snd_soc_dai *dai)
 {
@@ -690,7 +740,6 @@ static int mtk_afe_dais_trigger(struct snd_pcm_substream *substream, int cmd,
 		/* and clear pending IRQ */
 		regmap_write(afe->regmap, AFE_IRQ_CLR,
 			     1 << memif->data->irq_clr_shift);
-		memif->hw_ptr = 0;
 		return 0;
 	default:
 		return -EINVAL;
@@ -703,7 +752,6 @@ static const struct snd_soc_dai_ops mtk_afe_dai_ops = {
 	.shutdown	= mtk_afe_dais_shutdown,
 	.hw_params	= mtk_afe_dais_hw_params,
 	.hw_free	= mtk_afe_dais_hw_free,
-	.prepare	= mtk_afe_dais_prepare,
 	.trigger	= mtk_afe_dais_trigger,
 };
 
@@ -722,11 +770,53 @@ static const struct snd_soc_dai_ops mtk_afe_hdmi_ops = {
 
 };
 
+static int mtk_afe_runtime_suspend(struct device *dev);
+static int mtk_afe_runtime_resume(struct device *dev);
+
+static int mtk_afe_dai_suspend(struct snd_soc_dai *dai)
+{
+	struct mtk_afe *afe = snd_soc_dai_get_drvdata(dai);
+	int i;
+
+	dev_dbg(afe->dev, "%s\n", __func__);
+	if (pm_runtime_status_suspended(afe->dev) || afe->suspended)
+		return 0;
+
+	for (i = 0; i < ARRAY_SIZE(mtk_afe_backup_list); i++)
+		regmap_read(afe->regmap, mtk_afe_backup_list[i],
+			    &afe->backup_regs[i]);
+
+	afe->suspended = true;
+	mtk_afe_runtime_suspend(afe->dev);
+	return 0;
+}
+
+static int mtk_afe_dai_resume(struct snd_soc_dai *dai)
+{
+	struct mtk_afe *afe = snd_soc_dai_get_drvdata(dai);
+	int i = 0;
+
+	dev_dbg(afe->dev, "%s\n", __func__);
+	if (pm_runtime_status_suspended(afe->dev) || !afe->suspended)
+		return 0;
+
+	mtk_afe_runtime_resume(afe->dev);
+
+	for (i = 0; i < ARRAY_SIZE(mtk_afe_backup_list); i++)
+		regmap_write(afe->regmap, mtk_afe_backup_list[i],
+			     afe->backup_regs[i]);
+
+	afe->suspended = false;
+	return 0;
+}
+
 static struct snd_soc_dai_driver mtk_afe_pcm_dais[] = {
 	/* FE DAIs: memory intefaces to CPU */
 	{
 		.name = "DL1", /* downlink 1 */
 		.id = MTK_AFE_MEMIF_DL1,
+		.suspend = mtk_afe_dai_suspend,
+		.resume = mtk_afe_dai_resume,
 		.playback = {
 			.stream_name = "DL1",
 			.channels_min = 1,
@@ -738,6 +828,8 @@ static struct snd_soc_dai_driver mtk_afe_pcm_dais[] = {
 	}, {
 		.name = "VUL", /* voice uplink */
 		.id = MTK_AFE_MEMIF_VUL,
+		.suspend = mtk_afe_dai_suspend,
+		.resume = mtk_afe_dai_resume,
 		.capture = {
 			.stream_name = "VUL",
 			.channels_min = 1,
@@ -774,6 +866,8 @@ static struct snd_soc_dai_driver mtk_afe_hdmi_dais[] = {
 	{
 		.name = "HDMI",
 		.id = MTK_AFE_MEMIF_HDMI,
+		.suspend = mtk_afe_dai_suspend,
+		.resume = mtk_afe_dai_resume,
 		.playback = {
 			.stream_name = "HDMI",
 			.channels_min = 2,
@@ -812,19 +906,19 @@ static const struct snd_kcontrol_new mtk_afe_o04_mix[] = {
 };
 
 static const struct snd_kcontrol_new mtk_afe_o09_mix[] = {
+	SOC_DAPM_SINGLE_AUTODISABLE("I03 Switch", AFE_CONN3, 0, 1, 0),
 	SOC_DAPM_SINGLE_AUTODISABLE("I17 Switch", AFE_CONN7, 30, 1, 0),
 };
 
 static const struct snd_kcontrol_new mtk_afe_o10_mix[] = {
+	SOC_DAPM_SINGLE_AUTODISABLE("I04 Switch", AFE_CONN3, 3, 1, 0),
 	SOC_DAPM_SINGLE_AUTODISABLE("I18 Switch", AFE_CONN8, 0, 1, 0),
 };
 
 static const struct snd_soc_dapm_widget mtk_afe_pcm_widgets[] = {
-	/* Backend DAIs  */
-	SND_SOC_DAPM_AIF_IN("I2S Capture", NULL, 0, SND_SOC_NOPM, 0, 0),
-	SND_SOC_DAPM_AIF_OUT("I2S Playback", NULL, 0, SND_SOC_NOPM, 0, 0),
-
 	/* inter-connections */
+	SND_SOC_DAPM_MIXER("I03", SND_SOC_NOPM, 0, 0, NULL, 0),
+	SND_SOC_DAPM_MIXER("I04", SND_SOC_NOPM, 0, 0, NULL, 0),
 	SND_SOC_DAPM_MIXER("I05", SND_SOC_NOPM, 0, 0, NULL, 0),
 	SND_SOC_DAPM_MIXER("I06", SND_SOC_NOPM, 0, 0, NULL, 0),
 	SND_SOC_DAPM_MIXER("I17", SND_SOC_NOPM, 0, 0, NULL, 0),
@@ -847,17 +941,16 @@ static const struct snd_soc_dapm_route mtk_afe_pcm_routes[] = {
 	{"I2S Playback", NULL, "O04"},
 	{"VUL", NULL, "O09"},
 	{"VUL", NULL, "O10"},
+	{"I03", NULL, "I2S Capture"},
+	{"I04", NULL, "I2S Capture"},
 	{"I17", NULL, "I2S Capture"},
 	{"I18", NULL, "I2S Capture"},
 	{ "O03", "I05 Switch", "I05" },
 	{ "O04", "I06 Switch", "I06" },
 	{ "O09", "I17 Switch", "I17" },
+	{ "O09", "I03 Switch", "I03" },
 	{ "O10", "I18 Switch", "I18" },
-};
-
-static const struct snd_soc_dapm_widget mtk_afe_hdmi_widgets[] = {
-	/* Backend DAIs  */
-	SND_SOC_DAPM_AIF_OUT("HDMIO Playback", NULL, 0, SND_SOC_NOPM, 0, 0),
+	{ "O10", "I04 Switch", "I04" },
 };
 
 static const struct snd_soc_dapm_route mtk_afe_hdmi_routes[] = {
@@ -874,8 +967,6 @@ static const struct snd_soc_component_driver mtk_afe_pcm_dai_component = {
 
 static const struct snd_soc_component_driver mtk_afe_hdmi_dai_component = {
 	.name = "mtk-afe-hdmi-dai",
-	.dapm_widgets = mtk_afe_hdmi_widgets,
-	.num_dapm_widgets = ARRAY_SIZE(mtk_afe_hdmi_widgets),
 	.dapm_routes = mtk_afe_hdmi_routes,
 	.num_dapm_routes = ARRAY_SIZE(mtk_afe_hdmi_routes),
 };
@@ -907,6 +998,7 @@ static const struct mtk_afe_memif_data memif_data[MTK_AFE_MEMIF_NUM] = {
 		.irq_en_shift = 0,
 		.irq_fs_shift = 4,
 		.irq_clr_shift = 0,
+		.msb_shift = 0,
 	}, {
 		.name = "DL2",
 		.id = MTK_AFE_MEMIF_DL2,
@@ -920,6 +1012,7 @@ static const struct mtk_afe_memif_data memif_data[MTK_AFE_MEMIF_NUM] = {
 		.irq_en_shift = 2,
 		.irq_fs_shift = 16,
 		.irq_clr_shift = 2,
+		.msb_shift = 1,
 	}, {
 		.name = "VUL",
 		.id = MTK_AFE_MEMIF_VUL,
@@ -933,6 +1026,7 @@ static const struct mtk_afe_memif_data memif_data[MTK_AFE_MEMIF_NUM] = {
 		.irq_en_shift = 1,
 		.irq_fs_shift = 8,
 		.irq_clr_shift = 1,
+		.msb_shift = 6,
 	}, {
 		.name = "DAI",
 		.id = MTK_AFE_MEMIF_DAI,
@@ -946,6 +1040,7 @@ static const struct mtk_afe_memif_data memif_data[MTK_AFE_MEMIF_NUM] = {
 		.irq_en_shift = 3,
 		.irq_fs_shift = 20,
 		.irq_clr_shift = 3,
+		.msb_shift = 5,
 	}, {
 		.name = "AWB",
 		.id = MTK_AFE_MEMIF_AWB,
@@ -959,6 +1054,7 @@ static const struct mtk_afe_memif_data memif_data[MTK_AFE_MEMIF_NUM] = {
 		.irq_en_shift = 14,
 		.irq_fs_shift = 24,
 		.irq_clr_shift = 6,
+		.msb_shift = 3,
 	}, {
 		.name = "MOD_DAI",
 		.id = MTK_AFE_MEMIF_MOD_DAI,
@@ -972,6 +1068,7 @@ static const struct mtk_afe_memif_data memif_data[MTK_AFE_MEMIF_NUM] = {
 		.irq_en_shift = 3,
 		.irq_fs_shift = 20,
 		.irq_clr_shift = 3,
+		.msb_shift = 4,
 	}, {
 		.name = "HDMI",
 		.id = MTK_AFE_MEMIF_HDMI,
@@ -985,6 +1082,7 @@ static const struct mtk_afe_memif_data memif_data[MTK_AFE_MEMIF_NUM] = {
 		.irq_en_shift = 12,
 		.irq_fs_shift = -1,
 		.irq_clr_shift = 4,
+		.msb_shift = 8,
 	},
 };
 
@@ -999,7 +1097,7 @@ static const struct regmap_config mtk_afe_regmap_config = {
 static irqreturn_t mtk_afe_irq_handler(int irq, void *dev_id)
 {
 	struct mtk_afe *afe = dev_id;
-	unsigned int reg_value, hw_ptr;
+	unsigned int reg_value;
 	int i, ret;
 
 	ret = regmap_read(afe->regmap, AFE_IRQ_STATUS, &reg_value);
@@ -1015,13 +1113,6 @@ static irqreturn_t mtk_afe_irq_handler(int irq, void *dev_id)
 		if (!(reg_value & (1 << memif->data->irq_clr_shift)))
 			continue;
 
-		ret = regmap_read(afe->regmap, memif->data->reg_ofs_cur,
-				  &hw_ptr);
-		if (ret || hw_ptr == 0) {
-			dev_err(afe->dev, "%s hw_ptr err\n", __func__);
-			hw_ptr = memif->phys_buf_addr;
-		}
-		memif->hw_ptr = hw_ptr - memif->phys_buf_addr;
 		snd_pcm_period_elapsed(memif->substream);
 	}
 
@@ -1035,6 +1126,9 @@ err_irq:
 static int mtk_afe_runtime_suspend(struct device *dev)
 {
 	struct mtk_afe *afe = dev_get_drvdata(dev);
+
+	/* disable AFE */
+	regmap_update_bits(afe->regmap, AFE_DAC_CON0, 0x1, 0);
 
 	/* disable AFE clk */
 	regmap_update_bits(afe->regmap, AUDIO_TOP_CON0,
@@ -1082,6 +1176,9 @@ static int mtk_afe_runtime_resume(struct device *dev)
 
 	/* unmask all IRQs */
 	regmap_update_bits(afe->regmap, AFE_IRQ_MCU_EN, 0xff, 0xff);
+
+	/* enable AFE */
+	regmap_update_bits(afe->regmap, AFE_DAC_CON0, 0x1, 0x1);
 	return 0;
 
 err_bck0:
@@ -1118,6 +1215,10 @@ static int mtk_afe_pcm_dev_probe(struct platform_device *pdev)
 	unsigned int irq_id;
 	struct mtk_afe *afe;
 	struct resource *res;
+
+	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(33));
+	if (ret)
+		return ret;
 
 	afe = devm_kzalloc(&pdev->dev, sizeof(*afe), GFP_KERNEL);
 	if (!afe)
@@ -1199,6 +1300,8 @@ err_pm_disable:
 static int mtk_afe_pcm_dev_remove(struct platform_device *pdev)
 {
 	pm_runtime_disable(&pdev->dev);
+	if (!pm_runtime_status_suspended(&pdev->dev))
+		mtk_afe_runtime_suspend(&pdev->dev);
 	snd_soc_unregister_component(&pdev->dev);
 	snd_soc_unregister_platform(&pdev->dev);
 	return 0;
@@ -1218,7 +1321,6 @@ static const struct dev_pm_ops mtk_afe_pm_ops = {
 static struct platform_driver mtk_afe_pcm_driver = {
 	.driver = {
 		   .name = "mtk-afe-pcm",
-		   .owner = THIS_MODULE,
 		   .of_match_table = mtk_afe_pcm_dt_match,
 		   .pm = &mtk_afe_pm_ops,
 	},

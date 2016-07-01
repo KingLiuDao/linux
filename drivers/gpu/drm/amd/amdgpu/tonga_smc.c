@@ -25,7 +25,7 @@
 #include "drmP.h"
 #include "amdgpu.h"
 #include "tonga_ppsmc.h"
-#include "tonga_smumgr.h"
+#include "tonga_smum.h"
 #include "smu_ucode_xfer_vi.h"
 #include "amdgpu_ucode.h"
 
@@ -271,6 +271,12 @@ static int tonga_smu_upload_firmware_image(struct amdgpu_device *adev)
 
 	if (!adev->pm.fw)
 		return -EINVAL;
+
+	/* Skip SMC ucode loading on SR-IOV capable boards.
+	 * vbios does this for us in asic_init in that case.
+	 */
+	if (adev->virtualization.supports_sr_iov)
+		return 0;
 
 	hdr = (const struct smc_firmware_header_v1_0 *)adev->pm.fw->data;
 	amdgpu_ucode_print_smc_hdr(&hdr->header);
@@ -761,7 +767,9 @@ int tonga_smu_init(struct amdgpu_device *adev)
 
 	/* Allocate FW image data structure and header buffer */
 	ret = amdgpu_bo_create(adev, image_size, PAGE_SIZE,
-				true, AMDGPU_GEM_DOMAIN_VRAM, 0, NULL, toc_buf);
+			       true, AMDGPU_GEM_DOMAIN_VRAM,
+			       AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED,
+			       NULL, NULL, toc_buf);
 	if (ret) {
 		DRM_ERROR("Failed to allocate memory for TOC buffer\n");
 		return -ENOMEM;
@@ -769,7 +777,9 @@ int tonga_smu_init(struct amdgpu_device *adev)
 
 	/* Allocate buffer for SMU internal buffer */
 	ret = amdgpu_bo_create(adev, smu_internal_buffer_size, PAGE_SIZE,
-				true, AMDGPU_GEM_DOMAIN_VRAM, 0, NULL, smu_buf);
+			       true, AMDGPU_GEM_DOMAIN_VRAM,
+			       AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED,
+			       NULL, NULL, smu_buf);
 	if (ret) {
 		DRM_ERROR("Failed to allocate memory for SMU internal buffer\n");
 		return -ENOMEM;

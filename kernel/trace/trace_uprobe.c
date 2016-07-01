@@ -334,7 +334,7 @@ static int register_trace_uprobe(struct trace_uprobe *tu)
 
 	ret = register_uprobe_event(tu);
 	if (ret) {
-		pr_warning("Failed to register probe event(%d)\n", ret);
+		pr_warn("Failed to register probe event(%d)\n", ret);
 		goto end;
 	}
 
@@ -601,7 +601,22 @@ static int probes_seq_show(struct seq_file *m, void *v)
 
 	seq_printf(m, "%c:%s/%s", c, tu->tp.call.class->system,
 			trace_event_name(&tu->tp.call));
-	seq_printf(m, " %s:0x%p", tu->filename, (void *)tu->offset);
+	seq_printf(m, " %s:", tu->filename);
+
+	/* Don't print "0x  (null)" when offset is 0 */
+	if (tu->offset) {
+		seq_printf(m, "0x%p", (void *)tu->offset);
+	} else {
+		switch (sizeof(void *)) {
+		case 4:
+			seq_printf(m, "0x00000000");
+			break;
+		case 8:
+		default:
+			seq_printf(m, "0x0000000000000000");
+			break;
+		}
+	}
 
 	for (i = 0; i < tu->tp.nr_args; i++)
 		seq_printf(m, " %s=%s", tu->tp.args[i].name, tu->tp.args[i].comm);
@@ -1095,10 +1110,14 @@ static void __uprobe_perf_func(struct trace_uprobe *tu,
 {
 	struct trace_event_call *call = &tu->tp.call;
 	struct uprobe_trace_entry_head *entry;
+	struct bpf_prog *prog = call->prog;
 	struct hlist_head *head;
 	void *data;
 	int size, esize;
 	int rctx;
+
+	if (prog && !trace_call_bpf(prog, regs))
+		return;
 
 	esize = SIZEOF_TRACE_ENTRY(is_ret_probe(tu));
 
@@ -1112,7 +1131,7 @@ static void __uprobe_perf_func(struct trace_uprobe *tu,
 	if (hlist_empty(head))
 		goto out;
 
-	entry = perf_trace_buf_prepare(size, call->event.type, NULL, &rctx);
+	entry = perf_trace_buf_alloc(size, NULL, &rctx);
 	if (!entry)
 		goto out;
 
@@ -1133,7 +1152,8 @@ static void __uprobe_perf_func(struct trace_uprobe *tu,
 		memset(data + len, 0, size - esize - len);
 	}
 
-	perf_trace_buf_submit(entry, size, rctx, 0, 1, regs, head, NULL);
+	perf_trace_buf_submit(entry, size, rctx, call->event.type, 1, regs,
+			      head, NULL);
  out:
 	preempt_enable();
 }
@@ -1289,6 +1309,7 @@ static int register_uprobe_event(struct trace_uprobe *tu)
 		return -ENODEV;
 	}
 
+	call->flags = TRACE_EVENT_FL_UPROBE;
 	call->class->reg = trace_uprobe_register;
 	call->data = tu;
 	ret = trace_add_event_call(call);

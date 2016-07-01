@@ -38,6 +38,7 @@
 #define MXC_CPU_IMX6DL		0x61
 #define MXC_CPU_IMX6SX		0x62
 #define MXC_CPU_IMX6Q		0x63
+#define MXC_CPU_IMX6UL		0x64
 #define MXC_CPU_IMX7D		0x72
 
 #define IMX_DDR_TYPE_LPDDR2		1
@@ -165,6 +166,11 @@ static inline bool cpu_is_imx6sx(void)
 	return __mxc_cpu_type == MXC_CPU_IMX6SX;
 }
 
+static inline bool cpu_is_imx6ul(void)
+{
+	return __mxc_cpu_type == MXC_CPU_IMX6UL;
+}
+
 static inline bool cpu_is_imx6q(void)
 {
 	return __mxc_cpu_type == MXC_CPU_IMX6Q;
@@ -186,5 +192,10 @@ extern struct cpu_op *(*get_cpu_op)(int *op);
 
 #define cpu_is_mx3()	(cpu_is_mx31() || cpu_is_mx35())
 #define cpu_is_mx2()	(cpu_is_mx21() || cpu_is_mx27())
+
+#define imx_readl	readl_relaxed
+#define imx_readw	readw_relaxed
+#define imx_writel	writel_relaxed
+#define imx_writew	writew_relaxed
 
 #endif /*  __ASM_ARCH_MXC_H__ */

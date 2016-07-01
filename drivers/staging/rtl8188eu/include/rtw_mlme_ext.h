@@ -11,11 +11,6 @@
  * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
  * more details.
  *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110, USA
- *
- *
  ******************************************************************************/
 #ifndef __RTW_MLME_EXT_H_
 #define __RTW_MLME_EXT_H_
@@ -348,7 +343,7 @@ struct mlme_ext_info {
 	u8	candidate_tid_bitmap;
 	u8	dialogToken;
 	/*  Accept ADDBA Request */
-	bool bAcceptAddbaReq;
+	bool accept_addba_req;
 	u8	bwmode_updated;
 	u8	hidden_ssid_mode;
 
@@ -457,9 +452,9 @@ struct mlme_ext_priv {
 int init_mlme_ext_priv(struct adapter *adapter);
 int init_hw_mlme_ext(struct adapter *padapter);
 void free_mlme_ext_priv(struct mlme_ext_priv *pmlmeext);
-extern void init_mlme_ext_timer(struct adapter *padapter);
-extern void init_addba_retry_timer(struct adapter *adapt, struct sta_info *sta);
-extern struct xmit_frame *alloc_mgtxmitframe(struct xmit_priv *pxmitpriv);
+void init_mlme_ext_timer(struct adapter *padapter);
+void init_addba_retry_timer(struct adapter *adapt, struct sta_info *sta);
+struct xmit_frame *alloc_mgtxmitframe(struct xmit_priv *pxmitpriv);
 
 unsigned char networktype_to_raid(unsigned char network_type);
 u8 judge_network_type(struct adapter *padapter, unsigned char *rate, int len);
@@ -554,7 +549,7 @@ void report_add_sta_event(struct adapter *padapter, unsigned char *addr,
 			  int cam_idx);
 
 void beacon_timing_control(struct adapter *padapter);
-extern u8 set_tx_beacon_cmd(struct adapter *padapter);
+u8 set_tx_beacon_cmd(struct adapter *padapter);
 unsigned int setup_beacon_frame(struct adapter *padapter,
 				unsigned char *beacon_frame);
 void update_mgnt_tx_rate(struct adapter *padapter, u8 rate);

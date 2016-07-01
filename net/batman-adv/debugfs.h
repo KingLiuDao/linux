@@ -1,4 +1,4 @@
-/* Copyright (C) 2010-2015 B.A.T.M.A.N. contributors:
+/* Copyright (C) 2010-2016  B.A.T.M.A.N. contributors:
  *
  * Marek Lindner
  *
@@ -22,7 +22,6 @@
 
 #include <linux/kconfig.h>
 
-struct batadv_hard_iface;
 struct net_device;
 
 #define BATADV_DEBUGFS_SUBDIR "batman_adv"

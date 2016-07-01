@@ -45,18 +45,16 @@
 #include "event.h"
 #include "session.h"
 #include "debug.h"
-#include "parse-options.h"
+#include <subcmd/parse-options.h>
+
+#include "intel-pt.h"
+#include "intel-bts.h"
 
 int auxtrace_mmap__mmap(struct auxtrace_mmap *mm,
 			struct auxtrace_mmap_params *mp,
 			void *userpg, int fd)
 {
 	struct perf_event_mmap_page *pc = userpg;
-
-#if BITS_PER_LONG != 64 && !defined(HAVE_SYNC_COMPARE_AND_SWAP_SUPPORT)
-	pr_err("Cannot use AUX area tracing mmaps\n");
-	return -1;
-#endif
 
 	WARN_ONCE(mm->base, "Uninitialized auxtrace_mmap\n");
 
@@ -72,6 +70,11 @@ int auxtrace_mmap__mmap(struct auxtrace_mmap *mm,
 		mm->base = NULL;
 		return 0;
 	}
+
+#if BITS_PER_LONG != 64 && !defined(HAVE_SYNC_COMPARE_AND_SWAP_SUPPORT)
+	pr_err("Cannot use AUX area tracing mmaps\n");
+	return -1;
+#endif
 
 	pc->aux_offset = mp->offset;
 	pc->aux_size = mp->len;
@@ -119,12 +122,12 @@ void auxtrace_mmap_params__set_idx(struct auxtrace_mmap_params *mp,
 	if (per_cpu) {
 		mp->cpu = evlist->cpus->map[idx];
 		if (evlist->threads)
-			mp->tid = evlist->threads->map[0];
+			mp->tid = thread_map__pid(evlist->threads, 0);
 		else
 			mp->tid = -1;
 	} else {
 		mp->cpu = -1;
-		mp->tid = evlist->threads->map[idx];
+		mp->tid = thread_map__pid(evlist->threads, idx);
 	}
 }
 
@@ -475,10 +478,11 @@ void auxtrace_heap__pop(struct auxtrace_heap *heap)
 			 heap_array[last].ordinal);
 }
 
-size_t auxtrace_record__info_priv_size(struct auxtrace_record *itr)
+size_t auxtrace_record__info_priv_size(struct auxtrace_record *itr,
+				       struct perf_evlist *evlist)
 {
 	if (itr)
-		return itr->info_priv_size(itr);
+		return itr->info_priv_size(itr, evlist);
 	return 0;
 }
 
@@ -849,7 +853,7 @@ int perf_event__synthesize_auxtrace_info(struct auxtrace_record *itr,
 	int err;
 
 	pr_debug2("Synthesizing auxtrace information\n");
-	priv_size = auxtrace_record__info_priv_size(itr);
+	priv_size = auxtrace_record__info_priv_size(itr, session->evlist);
 	ev = zalloc(sizeof(struct auxtrace_info_event) + priv_size);
 	if (!ev)
 		return -ENOMEM;
@@ -876,7 +880,7 @@ static bool auxtrace__dont_decode(struct perf_session *session)
 
 int perf_event__process_auxtrace_info(struct perf_tool *tool __maybe_unused,
 				      union perf_event *event,
-				      struct perf_session *session __maybe_unused)
+				      struct perf_session *session)
 {
 	enum auxtrace_type type = event->auxtrace_info.type;
 
@@ -884,6 +888,10 @@ int perf_event__process_auxtrace_info(struct perf_tool *tool __maybe_unused,
 		fprintf(stdout, " type: %u\n", type);
 
 	switch (type) {
+	case PERF_AUXTRACE_INTEL_PT:
+		return intel_pt_process_auxtrace_info(event, session);
+	case PERF_AUXTRACE_INTEL_BTS:
+		return intel_bts_process_auxtrace_info(event, session);
 	case PERF_AUXTRACE_UNKNOWN:
 	default:
 		return -EINVAL;
@@ -919,6 +927,8 @@ s64 perf_event__process_auxtrace(struct perf_tool *tool,
 #define PERF_ITRACE_DEFAULT_PERIOD		100000
 #define PERF_ITRACE_DEFAULT_CALLCHAIN_SZ	16
 #define PERF_ITRACE_MAX_CALLCHAIN_SZ		1024
+#define PERF_ITRACE_DEFAULT_LAST_BRANCH_SZ	64
+#define PERF_ITRACE_MAX_LAST_BRANCH_SZ		1024
 
 void itrace_synth_opts__set_default(struct itrace_synth_opts *synth_opts)
 {
@@ -929,6 +939,8 @@ void itrace_synth_opts__set_default(struct itrace_synth_opts *synth_opts)
 	synth_opts->period_type = PERF_ITRACE_DEFAULT_PERIOD_TYPE;
 	synth_opts->period = PERF_ITRACE_DEFAULT_PERIOD;
 	synth_opts->callchain_sz = PERF_ITRACE_DEFAULT_CALLCHAIN_SZ;
+	synth_opts->last_branch_sz = PERF_ITRACE_DEFAULT_LAST_BRANCH_SZ;
+	synth_opts->initial_skip = 0;
 }
 
 /*
@@ -942,6 +954,8 @@ int itrace_parse_synth_opts(const struct option *opt, const char *str,
 	struct itrace_synth_opts *synth_opts = opt->value;
 	const char *p;
 	char *endptr;
+	bool period_type_set = false;
+	bool period_set = false;
 
 	synth_opts->set = true;
 
@@ -963,6 +977,7 @@ int itrace_parse_synth_opts(const struct option *opt, const char *str,
 				p += 1;
 			if (isdigit(*p)) {
 				synth_opts->period = strtoull(p, &endptr, 10);
+				period_set = true;
 				p = endptr;
 				while (*p == ' ' || *p == ',')
 					p += 1;
@@ -970,10 +985,12 @@ int itrace_parse_synth_opts(const struct option *opt, const char *str,
 				case 'i':
 					synth_opts->period_type =
 						PERF_ITRACE_PERIOD_INSTRUCTIONS;
+					period_type_set = true;
 					break;
 				case 't':
 					synth_opts->period_type =
 						PERF_ITRACE_PERIOD_TICKS;
+					period_type_set = true;
 					break;
 				case 'm':
 					synth_opts->period *= 1000;
@@ -986,6 +1003,7 @@ int itrace_parse_synth_opts(const struct option *opt, const char *str,
 						goto out_err;
 					synth_opts->period_type =
 						PERF_ITRACE_PERIOD_NANOSECS;
+					period_type_set = true;
 					break;
 				case '\0':
 					goto out;
@@ -1030,6 +1048,29 @@ int itrace_parse_synth_opts(const struct option *opt, const char *str,
 				synth_opts->callchain_sz = val;
 			}
 			break;
+		case 'l':
+			synth_opts->last_branch = true;
+			synth_opts->last_branch_sz =
+					PERF_ITRACE_DEFAULT_LAST_BRANCH_SZ;
+			while (*p == ' ' || *p == ',')
+				p += 1;
+			if (isdigit(*p)) {
+				unsigned int val;
+
+				val = strtoul(p, &endptr, 10);
+				p = endptr;
+				if (!val ||
+				    val > PERF_ITRACE_MAX_LAST_BRANCH_SZ)
+					goto out_err;
+				synth_opts->last_branch_sz = val;
+			}
+			break;
+		case 's':
+			synth_opts->initial_skip = strtoul(p, &endptr, 10);
+			if (p == endptr)
+				goto out_err;
+			p = endptr;
+			break;
 		case ' ':
 		case ',':
 			break;
@@ -1039,10 +1080,10 @@ int itrace_parse_synth_opts(const struct option *opt, const char *str,
 	}
 out:
 	if (synth_opts->instructions) {
-		if (!synth_opts->period_type)
+		if (!period_type_set)
 			synth_opts->period_type =
 					PERF_ITRACE_DEFAULT_PERIOD_TYPE;
-		if (!synth_opts->period)
+		if (!period_set)
 			synth_opts->period = PERF_ITRACE_DEFAULT_PERIOD;
 	}
 
@@ -1180,6 +1221,13 @@ static int __auxtrace_mmap__read(struct auxtrace_mmap *mm,
 		data1 = &data[head_off - len1];
 		len2 = 0;
 		data2 = NULL;
+	}
+
+	if (itr->alignment) {
+		unsigned int unwanted = len1 % itr->alignment;
+
+		len1 -= unwanted;
+		size -= unwanted;
 	}
 
 	/* padding must be written by fn() e.g. record__process_auxtrace() */

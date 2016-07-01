@@ -9,6 +9,8 @@
  * any later version.
  */
 
+#include <crypto/hash.h>
+#include <crypto/skcipher.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/pfkeyv2.h>
@@ -31,7 +33,7 @@ static struct xfrm_algo_desc aead_list[] = {
 
 	.uinfo = {
 		.aead = {
-			.geniv = "seqniv",
+			.geniv = "seqiv",
 			.icv_truncbits = 64,
 		}
 	},
@@ -50,7 +52,7 @@ static struct xfrm_algo_desc aead_list[] = {
 
 	.uinfo = {
 		.aead = {
-			.geniv = "seqniv",
+			.geniv = "seqiv",
 			.icv_truncbits = 96,
 		}
 	},
@@ -69,7 +71,7 @@ static struct xfrm_algo_desc aead_list[] = {
 
 	.uinfo = {
 		.aead = {
-			.geniv = "seqniv",
+			.geniv = "seqiv",
 			.icv_truncbits = 128,
 		}
 	},
@@ -88,7 +90,7 @@ static struct xfrm_algo_desc aead_list[] = {
 
 	.uinfo = {
 		.aead = {
-			.geniv = "seqniv",
+			.geniv = "seqiv",
 			.icv_truncbits = 64,
 		}
 	},
@@ -107,7 +109,7 @@ static struct xfrm_algo_desc aead_list[] = {
 
 	.uinfo = {
 		.aead = {
-			.geniv = "seqniv",
+			.geniv = "seqiv",
 			.icv_truncbits = 96,
 		}
 	},
@@ -126,7 +128,7 @@ static struct xfrm_algo_desc aead_list[] = {
 
 	.uinfo = {
 		.aead = {
-			.geniv = "seqniv",
+			.geniv = "seqiv",
 			.icv_truncbits = 128,
 		}
 	},
@@ -164,7 +166,7 @@ static struct xfrm_algo_desc aead_list[] = {
 
 	.uinfo = {
 		.aead = {
-			.geniv = "seqniv",
+			.geniv = "seqiv",
 			.icv_truncbits = 128,
 		}
 	},
@@ -782,14 +784,13 @@ void xfrm_probe_algs(void)
 	BUG_ON(in_softirq());
 
 	for (i = 0; i < aalg_entries(); i++) {
-		status = crypto_has_hash(aalg_list[i].name, 0,
-					 CRYPTO_ALG_ASYNC);
+		status = crypto_has_ahash(aalg_list[i].name, 0, 0);
 		if (aalg_list[i].available != status)
 			aalg_list[i].available = status;
 	}
 
 	for (i = 0; i < ealg_entries(); i++) {
-		status = crypto_has_ablkcipher(ealg_list[i].name, 0, 0);
+		status = crypto_has_skcipher(ealg_list[i].name, 0, 0);
 		if (ealg_list[i].available != status)
 			ealg_list[i].available = status;
 	}

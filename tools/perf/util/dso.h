@@ -135,8 +135,13 @@ struct dso {
 	pthread_mutex_t	 lock;
 	struct list_head node;
 	struct rb_node	 rb_node;	/* rbtree node sorted by long name */
+	struct rb_root	 *root;		/* root of rbtree that rb_node is in */
 	struct rb_root	 symbols[MAP__NR_TYPES];
 	struct rb_root	 symbol_names[MAP__NR_TYPES];
+	struct {
+		u64		addr;
+		struct symbol	*symbol;
+	} last_find_result[MAP__NR_TYPES];
 	void		 *a2l;
 	char		 *symsrc_filename;
 	unsigned int	 a2l_fails;
@@ -157,6 +162,7 @@ struct dso {
 	u8		 loaded;
 	u8		 rel;
 	u8		 build_id[BUILD_ID_SIZE];
+	u64		 text_offset;
 	const char	 *short_name;
 	const char	 *long_name;
 	u16		 long_name_len;
@@ -296,7 +302,7 @@ int __kmod_path__parse(struct kmod_path *m, const char *path,
  * TODO
 */
 int dso__data_get_fd(struct dso *dso, struct machine *machine);
-void dso__data_put_fd(struct dso *dso __maybe_unused);
+void dso__data_put_fd(struct dso *dso);
 void dso__data_close(struct dso *dso);
 
 off_t dso__data_size(struct dso *dso, struct machine *machine);
@@ -319,6 +325,8 @@ struct dso *dsos__find(struct dsos *dsos, const char *name, bool cmp_short);
 struct dso *__dsos__findnew(struct dsos *dsos, const char *name);
 struct dso *dsos__findnew(struct dsos *dsos, const char *name);
 bool __dsos__read_build_ids(struct list_head *head, bool with_hits);
+
+void dso__reset_find_symbol_cache(struct dso *dso);
 
 size_t __dsos__fprintf_buildid(struct list_head *head, FILE *fp,
 			       bool (skip)(struct dso *dso, int parm), int parm);

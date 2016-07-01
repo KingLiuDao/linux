@@ -22,9 +22,9 @@ struct bpf_map_def SEC("maps") progs = {
 SEC("kprobe/seccomp_phase1")
 int bpf_prog1(struct pt_regs *ctx)
 {
-	struct seccomp_data sd = {};
+	struct seccomp_data sd;
 
-	bpf_probe_read(&sd, sizeof(sd), (void *)ctx->di);
+	bpf_probe_read(&sd, sizeof(sd), (void *)PT_REGS_PARM1(ctx));
 
 	/* dispatch into next BPF program depending on syscall number */
 	bpf_tail_call(ctx, &progs, sd.nr);
@@ -40,9 +40,9 @@ int bpf_prog1(struct pt_regs *ctx)
 /* we jump here when syscall number == __NR_write */
 PROG(__NR_write)(struct pt_regs *ctx)
 {
-	struct seccomp_data sd = {};
+	struct seccomp_data sd;
 
-	bpf_probe_read(&sd, sizeof(sd), (void *)ctx->di);
+	bpf_probe_read(&sd, sizeof(sd), (void *)PT_REGS_PARM1(ctx));
 	if (sd.args[2] == 512) {
 		char fmt[] = "write(fd=%d, buf=%p, size=%d)\n";
 		bpf_trace_printk(fmt, sizeof(fmt),
@@ -53,9 +53,9 @@ PROG(__NR_write)(struct pt_regs *ctx)
 
 PROG(__NR_read)(struct pt_regs *ctx)
 {
-	struct seccomp_data sd = {};
+	struct seccomp_data sd;
 
-	bpf_probe_read(&sd, sizeof(sd), (void *)ctx->di);
+	bpf_probe_read(&sd, sizeof(sd), (void *)PT_REGS_PARM1(ctx));
 	if (sd.args[2] > 128 && sd.args[2] <= 1024) {
 		char fmt[] = "read(fd=%d, buf=%p, size=%d)\n";
 		bpf_trace_printk(fmt, sizeof(fmt),

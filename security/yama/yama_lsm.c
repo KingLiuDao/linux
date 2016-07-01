@@ -18,6 +18,10 @@
 #include <linux/prctl.h>
 #include <linux/ratelimit.h>
 #include <linux/workqueue.h>
+#include <linux/string_helpers.h>
+#include <linux/task_work.h>
+#include <linux/sched.h>
+#include <linux/spinlock.h>
 
 #define YAMA_SCOPE_DISABLED	0
 #define YAMA_SCOPE_RELATIONAL	1
@@ -40,6 +44,73 @@ static DEFINE_SPINLOCK(ptracer_relations_lock);
 
 static void yama_relation_cleanup(struct work_struct *work);
 static DECLARE_WORK(yama_relation_work, yama_relation_cleanup);
+
+struct access_report_info {
+	struct callback_head work;
+	const char *access;
+	struct task_struct *target;
+	struct task_struct *agent;
+};
+
+static void __report_access(struct callback_head *work)
+{
+	struct access_report_info *info =
+		container_of(work, struct access_report_info, work);
+	char *target_cmd, *agent_cmd;
+
+	target_cmd = kstrdup_quotable_cmdline(info->target, GFP_KERNEL);
+	agent_cmd = kstrdup_quotable_cmdline(info->agent, GFP_KERNEL);
+
+	pr_notice_ratelimited(
+		"ptrace %s of \"%s\"[%d] was attempted by \"%s\"[%d]\n",
+		info->access, target_cmd, info->target->pid, agent_cmd,
+		info->agent->pid);
+
+	kfree(agent_cmd);
+	kfree(target_cmd);
+
+	put_task_struct(info->agent);
+	put_task_struct(info->target);
+	kfree(info);
+}
+
+/* defers execution because cmdline access can sleep */
+static void report_access(const char *access, struct task_struct *target,
+				struct task_struct *agent)
+{
+	struct access_report_info *info;
+	char agent_comm[sizeof(agent->comm)];
+
+	assert_spin_locked(&target->alloc_lock); /* for target->comm */
+
+	if (current->flags & PF_KTHREAD) {
+		/* I don't think kthreads call task_work_run() before exiting.
+		 * Imagine angry ranting about procfs here.
+		 */
+		pr_notice_ratelimited(
+		    "ptrace %s of \"%s\"[%d] was attempted by \"%s\"[%d]\n",
+		    access, target->comm, target->pid,
+		    get_task_comm(agent_comm, agent), agent->pid);
+		return;
+	}
+
+	info = kmalloc(sizeof(*info), GFP_ATOMIC);
+	if (!info)
+		return;
+	init_task_work(&info->work, __report_access);
+	get_task_struct(target);
+	get_task_struct(agent);
+	info->access = access;
+	info->target = target;
+	info->agent = agent;
+	if (task_work_add(current, &info->work, true) == 0)
+		return; /* success */
+
+	WARN(1, "report_access called from exiting task");
+	put_task_struct(target);
+	put_task_struct(agent);
+	kfree(info);
+}
 
 /**
  * yama_relation_cleanup - remove invalid entries from the relation list
@@ -281,7 +352,7 @@ static int yama_ptrace_access_check(struct task_struct *child,
 	int rc = 0;
 
 	/* require ptrace target be a child of ptracer on attach */
-	if (mode == PTRACE_MODE_ATTACH) {
+	if (mode & PTRACE_MODE_ATTACH) {
 		switch (ptrace_scope) {
 		case YAMA_SCOPE_DISABLED:
 			/* No additional restrictions. */
@@ -307,11 +378,8 @@ static int yama_ptrace_access_check(struct task_struct *child,
 		}
 	}
 
-	if (rc) {
-		printk_ratelimited(KERN_NOTICE
-			"ptrace of pid %d was attempted by: %s (pid %d)\n",
-			child->pid, current->comm, current->pid);
-	}
+	if (rc && (mode & PTRACE_MODE_NOAUDIT) == 0)
+		report_access("attach", child, current);
 
 	return rc;
 }
@@ -338,9 +406,9 @@ int yama_ptrace_traceme(struct task_struct *parent)
 	}
 
 	if (rc) {
-		printk_ratelimited(KERN_NOTICE
-			"ptraceme of pid %d was attempted by: %s (pid %d)\n",
-			current->pid, parent->comm, parent->pid);
+		task_lock(current);
+		report_access("traceme", current, parent);
+		task_unlock(current);
 	}
 
 	return rc;
@@ -352,11 +420,6 @@ static struct security_hook_list yama_hooks[] = {
 	LSM_HOOK_INIT(task_prctl, yama_task_prctl),
 	LSM_HOOK_INIT(task_free, yama_task_free),
 };
-
-void __init yama_add_hooks(void)
-{
-	security_add_hooks(yama_hooks, ARRAY_SIZE(yama_hooks));
-}
 
 #ifdef CONFIG_SYSCTL
 static int yama_dointvec_minmax(struct ctl_table *table, int write,
@@ -396,25 +459,18 @@ static struct ctl_table yama_sysctl_table[] = {
 	},
 	{ }
 };
-#endif /* CONFIG_SYSCTL */
-
-static __init int yama_init(void)
+static void __init yama_init_sysctl(void)
 {
-#ifndef CONFIG_SECURITY_YAMA_STACKED
-	/*
-	 * If yama is being stacked this is already taken care of.
-	 */
-	if (!security_module_enable("yama"))
-		return 0;
-#endif
-	pr_info("Yama: becoming mindful.\n");
-
-#ifdef CONFIG_SYSCTL
 	if (!register_sysctl_paths(yama_sysctl_path, yama_sysctl_table))
 		panic("Yama: sysctl registration failed.\n");
-#endif
-
-	return 0;
 }
+#else
+static inline void yama_init_sysctl(void) { }
+#endif /* CONFIG_SYSCTL */
 
-security_initcall(yama_init);
+void __init yama_add_hooks(void)
+{
+	pr_info("Yama: becoming mindful.\n");
+	security_add_hooks(yama_hooks, ARRAY_SIZE(yama_hooks));
+	yama_init_sysctl();
+}

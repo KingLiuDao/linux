@@ -17,6 +17,7 @@ struct ring_buffer {
 #endif
 	int				nr_pages;	/* nr of data pages  */
 	int				overwrite;	/* can overwrite itself */
+	int				paused;		/* can write into ring buffer */
 
 	atomic_t			poll;		/* POLL_ for wakeups */
 
@@ -55,6 +56,23 @@ struct ring_buffer {
 };
 
 extern void rb_free(struct ring_buffer *rb);
+
+static inline void rb_free_rcu(struct rcu_head *rcu_head)
+{
+	struct ring_buffer *rb;
+
+	rb = container_of(rcu_head, struct ring_buffer, rcu_head);
+	rb_free(rb);
+}
+
+static inline void rb_toggle_paused(struct ring_buffer *rb, bool pause)
+{
+	if (!pause && rb->nr_pages)
+		rb->paused = 0;
+	else
+		rb->paused = 1;
+}
+
 extern struct ring_buffer *
 rb_alloc(int nr_pages, long watermark, int cpu, int flags);
 extern void perf_event_wakeup(struct perf_event *event);
@@ -172,8 +190,6 @@ DEFINE_OUTPUT_COPY(__output_copy_user, arch_perf_out_copy_user)
 /* Callchain handling */
 extern struct perf_callchain_entry *
 perf_callchain(struct perf_event *event, struct pt_regs *regs);
-extern int get_callchain_buffers(void);
-extern void put_callchain_buffers(void);
 
 static inline int get_recursion_context(int *recursion)
 {

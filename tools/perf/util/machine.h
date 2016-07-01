@@ -28,12 +28,15 @@ struct machine {
 	pid_t		  pid;
 	u16		  id_hdr_size;
 	bool		  comm_exec;
+	bool		  kptr_restrict_warned;
 	char		  *root_dir;
 	struct rb_root	  threads;
 	pthread_rwlock_t  threads_lock;
+	unsigned int	  nr_threads;
 	struct list_head  dead_threads;
 	struct thread	  *last_match;
 	struct vdso_info  *vdso_info;
+	struct perf_env   *env;
 	struct dsos	  dsos;
 	struct map_groups kmaps;
 	struct map	  *vmlinux_maps[MAP__NR_TYPES];
@@ -47,9 +50,15 @@ struct machine {
 };
 
 static inline
-struct map *machine__kernel_map(struct machine *machine, enum map_type type)
+struct map *__machine__kernel_map(struct machine *machine, enum map_type type)
 {
 	return machine->vmlinux_maps[type];
+}
+
+static inline
+struct map *machine__kernel_map(struct machine *machine)
+{
+	return __machine__kernel_map(machine, MAP__FUNCTION);
 }
 
 int machine__get_kernel_start(struct machine *machine);
@@ -87,6 +96,8 @@ int machine__process_aux_event(struct machine *machine,
 			       union perf_event *event);
 int machine__process_itrace_start_event(struct machine *machine,
 					union perf_event *event);
+int machine__process_switch_event(struct machine *machine,
+				  union perf_event *event);
 int machine__process_mmap_event(struct machine *machine, union perf_event *event,
 				struct perf_sample *sample);
 int machine__process_mmap2_event(struct machine *machine, union perf_event *event,
@@ -132,7 +143,11 @@ struct branch_info *sample__resolve_bstack(struct perf_sample *sample,
 					   struct addr_location *al);
 struct mem_info *sample__resolve_mem(struct perf_sample *sample,
 				     struct addr_location *al);
+
+struct callchain_cursor;
+
 int thread__resolve_callchain(struct thread *thread,
+			      struct callchain_cursor *cursor,
 			      struct perf_evsel *evsel,
 			      struct perf_sample *sample,
 			      struct symbol **parent,
@@ -171,6 +186,16 @@ struct symbol *machine__find_kernel_symbol(struct machine *machine,
 }
 
 static inline
+struct symbol *machine__find_kernel_symbol_by_name(struct machine *machine,
+						   enum map_type type, const char *name,
+						   struct map **mapp,
+						   symbol_filter_t filter)
+{
+	return map_groups__find_symbol_by_name(&machine->kmaps, type, name,
+					       mapp, filter);
+}
+
+static inline
 struct symbol *machine__find_kernel_function(struct machine *machine, u64 addr,
 					     struct map **mapp,
 					     symbol_filter_t filter)
@@ -192,6 +217,8 @@ struct symbol *machine__find_kernel_function_by_name(struct machine *machine,
 struct map *machine__findnew_module_map(struct machine *machine, u64 start,
 					const char *filename);
 
+int __machine__load_kallsyms(struct machine *machine, const char *filename,
+			     enum map_type type, bool no_kcore, symbol_filter_t filter);
 int machine__load_kallsyms(struct machine *machine, const char *filename,
 			   enum map_type type, symbol_filter_t filter);
 int machine__load_vmlinux_path(struct machine *machine, enum map_type type,
@@ -237,5 +264,9 @@ int machine__synthesize_threads(struct machine *machine, struct target *target,
 pid_t machine__get_current_tid(struct machine *machine, int cpu);
 int machine__set_current_tid(struct machine *machine, int cpu, pid_t pid,
 			     pid_t tid);
+/*
+ * For use with libtraceevent's pevent_set_function_resolver()
+ */
+char *machine__resolve_kernel_addr(void *vmachine, unsigned long long *addrp, char **modp);
 
 #endif /* __PERF_MACHINE_H */

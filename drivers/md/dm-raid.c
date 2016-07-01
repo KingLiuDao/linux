@@ -329,8 +329,7 @@ static int validate_region_size(struct raid_set *rs, unsigned long region_size)
 		 */
 		if (min_region_size > (1 << 13)) {
 			/* If not a power of 2, make it the next power of 2 */
-			if (min_region_size & (min_region_size - 1))
-				region_size = 1 << fls(region_size);
+			region_size = roundup_pow_of_two(min_region_size);
 			DMINFO("Choosing default region size of %lu sectors",
 			       region_size);
 		} else {
@@ -1038,6 +1037,11 @@ static int super_validate(struct raid_set *rs, struct md_rdev *rdev)
 	if (!mddev->events && super_init_validation(mddev, rdev))
 		return -EINVAL;
 
+	if (le32_to_cpu(sb->features)) {
+		rs->ti->error = "Unable to assemble array: No feature flags supported yet";
+		return -EINVAL;
+	}
+
 	/* Enable bitmap creation for RAID levels != 0 */
 	mddev->bitmap_info.offset = (rs->raid_type->level) ? to_sector(4096) : 0;
 	rdev->mddev->bitmap_info.default_offset = mddev->bitmap_info.offset;
@@ -1717,27 +1721,9 @@ static void raid_resume(struct dm_target *ti)
 	mddev_resume(&rs->md);
 }
 
-static int raid_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
-		      struct bio_vec *biovec, int max_size)
-{
-	struct raid_set *rs = ti->private;
-	struct md_personality *pers = rs->md.pers;
-
-	if (pers && pers->mergeable_bvec)
-		return min(max_size, pers->mergeable_bvec(&rs->md, bvm, biovec));
-
-	/*
-	 * In case we can't request the personality because
-	 * the raid set is not running yet
-	 *
-	 * -> return safe minimum
-	 */
-	return rs->md.chunk_sectors;
-}
-
 static struct target_type raid_target = {
 	.name = "raid",
-	.version = {1, 7, 0},
+	.version = {1, 8, 0},
 	.module = THIS_MODULE,
 	.ctr = raid_ctr,
 	.dtr = raid_dtr,
@@ -1749,7 +1735,6 @@ static struct target_type raid_target = {
 	.presuspend = raid_presuspend,
 	.postsuspend = raid_postsuspend,
 	.resume = raid_resume,
-	.merge = raid_merge,
 };
 
 static int __init dm_raid_init(void)

@@ -20,13 +20,9 @@
 #include <asm/hardware/cache-l2x0.h>
 #include <asm/suspend.h>
 
-#include <mach/map.h>
-
 #include "common.h"
 #include "smc.h"
 
-#define EXYNOS_SLEEP_MAGIC	0x00000bad
-#define EXYNOS_AFTR_MAGIC	0xfcba0d10
 #define EXYNOS_BOOT_ADDR	0x8
 #define EXYNOS_BOOT_FLAG	0xc
 

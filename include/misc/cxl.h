@@ -30,9 +30,6 @@ struct cxl_afu *cxl_pci_to_afu(struct pci_dev *dev);
 /* Get the AFU conf record number associated with a pci_dev */
 unsigned int cxl_pci_to_cfg_record(struct pci_dev *dev);
 
-/* Get the physical device (ie. the PCIe card) which the AFU is attached */
-struct device *cxl_get_phys_dev(struct pci_dev *dev);
-
 
 /*
  * Context lifetime overview:
@@ -130,6 +127,14 @@ int cxl_afu_reset(struct cxl_context *ctx);
 void cxl_set_master(struct cxl_context *ctx);
 
 /*
+ * Sets the context to use real mode memory accesses to operate with
+ * translation disabled. Note that this only makes sense for kernel contexts
+ * under bare metal, and will not work with virtualisation. May only be
+ * performed on stopped contexts.
+ */
+int cxl_set_translation_mode(struct cxl_context *ctx, bool real_mode);
+
+/*
  * Map and unmap the AFU Problem Space area. The amount and location mapped
  * depends on if this context is a master or slave.
  */
@@ -199,5 +204,20 @@ int cxl_fd_mmap(struct file *file, struct vm_area_struct *vm);
 unsigned int cxl_fd_poll(struct file *file, struct poll_table_struct *poll);
 ssize_t cxl_fd_read(struct file *file, char __user *buf, size_t count,
 			   loff_t *off);
+
+/*
+ * For EEH, a driver may want to assert a PERST will reload the same image
+ * from flash into the FPGA.
+ *
+ * This is a property of the entire adapter, not a single AFU, so drivers
+ * should set this property with care!
+ */
+void cxl_perst_reloads_same_image(struct cxl_afu *afu,
+				  bool perst_reloads_same_image);
+
+/*
+ * Read the VPD for the card where the AFU resides
+ */
+ssize_t cxl_read_adapter_vpd(struct pci_dev *dev, void *buf, size_t count);
 
 #endif /* _MISC_CXL_H */

@@ -21,6 +21,8 @@ struct mdp5_cmd_encoder {
 	struct mdp5_interface intf;
 	bool enabled;
 	uint32_t bsc;
+
+	struct mdp5_ctl *ctl;
 };
 #define to_mdp5_cmd_encoder(x) container_of(x, struct mdp5_cmd_encoder, base)
 
@@ -186,13 +188,6 @@ static const struct drm_encoder_funcs mdp5_cmd_encoder_funcs = {
 	.destroy = mdp5_cmd_encoder_destroy,
 };
 
-static bool mdp5_cmd_encoder_mode_fixup(struct drm_encoder *encoder,
-		const struct drm_display_mode *mode,
-		struct drm_display_mode *adjusted_mode)
-{
-	return true;
-}
-
 static void mdp5_cmd_encoder_mode_set(struct drm_encoder *encoder,
 		struct drm_display_mode *mode,
 		struct drm_display_mode *adjusted_mode)
@@ -210,13 +205,14 @@ static void mdp5_cmd_encoder_mode_set(struct drm_encoder *encoder,
 			mode->vsync_end, mode->vtotal,
 			mode->type, mode->flags);
 	pingpong_tearcheck_setup(encoder, mode);
-	mdp5_crtc_set_intf(encoder->crtc, &mdp5_cmd_enc->intf);
+	mdp5_crtc_set_pipeline(encoder->crtc, &mdp5_cmd_enc->intf,
+				mdp5_cmd_enc->ctl);
 }
 
 static void mdp5_cmd_encoder_disable(struct drm_encoder *encoder)
 {
 	struct mdp5_cmd_encoder *mdp5_cmd_enc = to_mdp5_cmd_encoder(encoder);
-	struct mdp5_ctl *ctl = mdp5_crtc_get_ctl(encoder->crtc);
+	struct mdp5_ctl *ctl = mdp5_cmd_enc->ctl;
 	struct mdp5_interface *intf = &mdp5_cmd_enc->intf;
 
 	if (WARN_ON(!mdp5_cmd_enc->enabled))
@@ -235,7 +231,7 @@ static void mdp5_cmd_encoder_disable(struct drm_encoder *encoder)
 static void mdp5_cmd_encoder_enable(struct drm_encoder *encoder)
 {
 	struct mdp5_cmd_encoder *mdp5_cmd_enc = to_mdp5_cmd_encoder(encoder);
-	struct mdp5_ctl *ctl = mdp5_crtc_get_ctl(encoder->crtc);
+	struct mdp5_ctl *ctl = mdp5_cmd_enc->ctl;
 	struct mdp5_interface *intf = &mdp5_cmd_enc->intf;
 
 	if (WARN_ON(mdp5_cmd_enc->enabled))
@@ -253,7 +249,6 @@ static void mdp5_cmd_encoder_enable(struct drm_encoder *encoder)
 }
 
 static const struct drm_encoder_helper_funcs mdp5_cmd_encoder_helper_funcs = {
-	.mode_fixup = mdp5_cmd_encoder_mode_fixup,
 	.mode_set = mdp5_cmd_encoder_mode_set,
 	.disable = mdp5_cmd_encoder_disable,
 	.enable = mdp5_cmd_encoder_enable,
@@ -300,7 +295,7 @@ int mdp5_cmd_encoder_set_split_display(struct drm_encoder *encoder,
 
 /* initialize command mode encoder */
 struct drm_encoder *mdp5_cmd_encoder_init(struct drm_device *dev,
-				struct mdp5_interface *intf)
+			struct mdp5_interface *intf, struct mdp5_ctl *ctl)
 {
 	struct drm_encoder *encoder = NULL;
 	struct mdp5_cmd_encoder *mdp5_cmd_enc;
@@ -320,9 +315,10 @@ struct drm_encoder *mdp5_cmd_encoder_init(struct drm_device *dev,
 
 	memcpy(&mdp5_cmd_enc->intf, intf, sizeof(mdp5_cmd_enc->intf));
 	encoder = &mdp5_cmd_enc->base;
+	mdp5_cmd_enc->ctl = ctl;
 
 	drm_encoder_init(dev, encoder, &mdp5_cmd_encoder_funcs,
-			DRM_MODE_ENCODER_DSI);
+			DRM_MODE_ENCODER_DSI, NULL);
 
 	drm_encoder_helper_add(encoder, &mdp5_cmd_encoder_helper_funcs);
 
@@ -336,4 +332,3 @@ fail:
 
 	return ERR_PTR(ret);
 }
-

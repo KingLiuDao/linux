@@ -53,8 +53,8 @@
 	compatible = "st,stm32f429i-disco", "st,stm32f429";
 
 	chosen {
-		bootargs = "console=ttyS0,115200 root=/dev/ram rdinit=/linuxrc";
-		linux,stdout-path = &usart1;
+		bootargs = "root=/dev/ram rdinit=/linuxrc";
+		stdout-path = "serial0:115200n8";
 	};
 
 	memory {
@@ -64,8 +64,25 @@
 	aliases {
 		serial0 = &usart1;
 	};
+
+	leds {
+		compatible = "gpio-leds";
+		red {
+			gpios = <&gpiog 14 0>;
+		};
+		green {
+			gpios = <&gpiog 13 0>;
+			linux,default-trigger = "heartbeat";
+		};
+	};
+};
+
+&clk_hse {
+	clock-frequency = <8000000>;
 };
 
 &usart1 {
+	pinctrl-0 = <&usart1_pins_a>;
+	pinctrl-names = "default";
 	status = "okay";
 };

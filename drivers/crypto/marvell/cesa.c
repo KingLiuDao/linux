@@ -306,7 +306,7 @@ static int mv_cesa_dev_dma_init(struct mv_cesa_dev *cesa)
 		return -ENOMEM;
 
 	dma->padding_pool = dmam_pool_create("cesa_padding", dev, 72, 1, 0);
-	if (!dma->cache_pool)
+	if (!dma->padding_pool)
 		return -ENOMEM;
 
 	cesa->dma = dma;
@@ -321,9 +321,8 @@ static int mv_cesa_get_sram(struct platform_device *pdev, int idx)
 	const char *res_name = "sram";
 	struct resource *res;
 
-	engine->pool = of_get_named_gen_pool(cesa->dev->of_node,
-					     "marvell,crypto-srams",
-					     idx);
+	engine->pool = of_gen_pool_get(cesa->dev->of_node,
+				       "marvell,crypto-srams", idx);
 	if (engine->pool) {
 		engine->sram = gen_pool_dma_alloc(engine->pool,
 						  cesa->sram_size,
@@ -421,7 +420,7 @@ static int mv_cesa_probe(struct platform_device *pdev)
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "regs");
 	cesa->regs = devm_ioremap_resource(dev, res);
 	if (IS_ERR(cesa->regs))
-		return -ENOMEM;
+		return PTR_ERR(cesa->regs);
 
 	ret = mv_cesa_dev_dma_init(cesa);
 	if (ret)
@@ -476,18 +475,18 @@ static int mv_cesa_probe(struct platform_device *pdev)
 		engine->regs = cesa->regs + CESA_ENGINE_OFF(i);
 
 		if (dram && cesa->caps->has_tdma)
-			mv_cesa_conf_mbus_windows(&cesa->engines[i], dram);
+			mv_cesa_conf_mbus_windows(engine, dram);
 
-		writel(0, cesa->engines[i].regs + CESA_SA_INT_STATUS);
+		writel(0, engine->regs + CESA_SA_INT_STATUS);
 		writel(CESA_SA_CFG_STOP_DIG_ERR,
-		       cesa->engines[i].regs + CESA_SA_CFG);
+		       engine->regs + CESA_SA_CFG);
 		writel(engine->sram_dma & CESA_SA_SRAM_MSK,
-		       cesa->engines[i].regs + CESA_SA_DESC_P0);
+		       engine->regs + CESA_SA_DESC_P0);
 
 		ret = devm_request_threaded_irq(dev, irq, NULL, mv_cesa_int,
 						IRQF_ONESHOT,
 						dev_name(&pdev->dev),
-						&cesa->engines[i]);
+						engine);
 		if (ret)
 			goto err_cleanup;
 	}
@@ -534,7 +533,6 @@ static struct platform_driver marvell_cesa = {
 	.probe		= mv_cesa_probe,
 	.remove		= mv_cesa_remove,
 	.driver		= {
-		.owner	= THIS_MODULE,
 		.name	= "marvell-cesa",
 		.of_match_table = mv_cesa_of_match_table,
 	},

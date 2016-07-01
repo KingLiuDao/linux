@@ -131,37 +131,53 @@ static struct snd_soc_dai_link_component mt8173_rt5650_rt5676_codecs[] = {
 	},
 };
 
+enum {
+	DAI_LINK_PLAYBACK,
+	DAI_LINK_CAPTURE,
+	DAI_LINK_HDMI,
+	DAI_LINK_CODEC_I2S,
+	DAI_LINK_HDMI_I2S,
+	DAI_LINK_INTERCODEC
+};
+
 /* Digital audio interface glue - connects codec <---> CPU */
 static struct snd_soc_dai_link mt8173_rt5650_rt5676_dais[] = {
 	/* Front End DAI links */
-	{
+	[DAI_LINK_PLAYBACK] = {
 		.name = "rt5650_rt5676 Playback",
 		.stream_name = "rt5650_rt5676 Playback",
 		.cpu_dai_name = "DL1",
-		.platform_name = "11220000.mt8173-afe-pcm",
 		.codec_name = "snd-soc-dummy",
 		.codec_dai_name = "snd-soc-dummy-dai",
 		.trigger = {SND_SOC_DPCM_TRIGGER_POST, SND_SOC_DPCM_TRIGGER_POST},
 		.dynamic = 1,
 		.dpcm_playback = 1,
 	},
-	{
+	[DAI_LINK_CAPTURE] = {
 		.name = "rt5650_rt5676 Capture",
 		.stream_name = "rt5650_rt5676 Capture",
 		.cpu_dai_name = "VUL",
-		.platform_name = "11220000.mt8173-afe-pcm",
 		.codec_name = "snd-soc-dummy",
 		.codec_dai_name = "snd-soc-dummy-dai",
 		.trigger = {SND_SOC_DPCM_TRIGGER_POST, SND_SOC_DPCM_TRIGGER_POST},
 		.dynamic = 1,
 		.dpcm_capture = 1,
 	},
+	[DAI_LINK_HDMI] = {
+		.name = "HDMI",
+		.stream_name = "HDMI PCM",
+		.cpu_dai_name = "HDMI",
+		.codec_name = "snd-soc-dummy",
+		.codec_dai_name = "snd-soc-dummy-dai",
+		.trigger = {SND_SOC_DPCM_TRIGGER_POST, SND_SOC_DPCM_TRIGGER_POST},
+		.dynamic = 1,
+		.dpcm_playback = 1,
+	},
 
 	/* Back End DAI links */
-	{
+	[DAI_LINK_CODEC_I2S] = {
 		.name = "Codec",
 		.cpu_dai_name = "I2S",
-		.platform_name = "11220000.mt8173-afe-pcm",
 		.no_pcm = 1,
 		.codecs = mt8173_rt5650_rt5676_codecs,
 		.num_codecs = 2,
@@ -173,7 +189,15 @@ static struct snd_soc_dai_link mt8173_rt5650_rt5676_dais[] = {
 		.dpcm_playback = 1,
 		.dpcm_capture = 1,
 	},
-	{ /* rt5676 <-> rt5650 intercodec link: Sets rt5676 I2S2 as master */
+	[DAI_LINK_HDMI_I2S] = {
+		.name = "HDMI BE",
+		.cpu_dai_name = "HDMIO",
+		.no_pcm = 1,
+		.codec_dai_name = "i2s-hifi",
+		.dpcm_playback = 1,
+	},
+	/* rt5676 <-> rt5650 intercodec link: Sets rt5676 I2S2 as master */
+	[DAI_LINK_INTERCODEC] = {
 		.name = "rt5650_rt5676 intercodec",
 		.stream_name = "rt5650_rt5676 intercodec",
 		.cpu_dai_name = "snd-soc-dummy-dai",
@@ -194,6 +218,7 @@ static struct snd_soc_codec_conf mt8173_rt5650_rt5676_codec_conf[] = {
 
 static struct snd_soc_card mt8173_rt5650_rt5676_card = {
 	.name = "mtk-rt5650-rt5676",
+	.owner = THIS_MODULE,
 	.dai_link = mt8173_rt5650_rt5676_dais,
 	.num_links = ARRAY_SIZE(mt8173_rt5650_rt5676_dais),
 	.codec_conf = mt8173_rt5650_rt5676_codec_conf,
@@ -209,7 +234,21 @@ static struct snd_soc_card mt8173_rt5650_rt5676_card = {
 static int mt8173_rt5650_rt5676_dev_probe(struct platform_device *pdev)
 {
 	struct snd_soc_card *card = &mt8173_rt5650_rt5676_card;
-	int ret;
+	struct device_node *platform_node;
+	int i, ret;
+
+	platform_node = of_parse_phandle(pdev->dev.of_node,
+					 "mediatek,platform", 0);
+	if (!platform_node) {
+		dev_err(&pdev->dev, "Property 'platform' missing or invalid\n");
+		return -EINVAL;
+	}
+
+	for (i = 0; i < card->num_links; i++) {
+		if (mt8173_rt5650_rt5676_dais[i].platform_name)
+			continue;
+		mt8173_rt5650_rt5676_dais[i].platform_of_node = platform_node;
+	}
 
 	mt8173_rt5650_rt5676_codecs[0].of_node =
 		of_parse_phandle(pdev->dev.of_node, "mediatek,audio-codec", 0);
@@ -228,25 +267,25 @@ static int mt8173_rt5650_rt5676_dev_probe(struct platform_device *pdev)
 	mt8173_rt5650_rt5676_codec_conf[0].of_node =
 		mt8173_rt5650_rt5676_codecs[1].of_node;
 
-	mt8173_rt5650_rt5676_dais[3].codec_of_node =
+	mt8173_rt5650_rt5676_dais[DAI_LINK_INTERCODEC].codec_of_node =
 		mt8173_rt5650_rt5676_codecs[1].of_node;
+
+	mt8173_rt5650_rt5676_dais[DAI_LINK_HDMI_I2S].codec_of_node =
+		of_parse_phandle(pdev->dev.of_node, "mediatek,audio-codec", 2);
+	if (!mt8173_rt5650_rt5676_dais[DAI_LINK_HDMI_I2S].codec_of_node) {
+		dev_err(&pdev->dev,
+			"Property 'audio-codec' missing or invalid\n");
+		return -EINVAL;
+	}
 
 	card->dev = &pdev->dev;
 	platform_set_drvdata(pdev, card);
 
-	ret = snd_soc_register_card(card);
+	ret = devm_snd_soc_register_card(&pdev->dev, card);
 	if (ret)
 		dev_err(&pdev->dev, "%s snd_soc_register_card fail %d\n",
 			__func__, ret);
 	return ret;
-}
-
-static int mt8173_rt5650_rt5676_dev_remove(struct platform_device *pdev)
-{
-	struct snd_soc_card *card = platform_get_drvdata(pdev);
-
-	snd_soc_unregister_card(card);
-	return 0;
 }
 
 static const struct of_device_id mt8173_rt5650_rt5676_dt_match[] = {
@@ -258,14 +297,12 @@ MODULE_DEVICE_TABLE(of, mt8173_rt5650_rt5676_dt_match);
 static struct platform_driver mt8173_rt5650_rt5676_driver = {
 	.driver = {
 		   .name = "mtk-rt5650-rt5676",
-		   .owner = THIS_MODULE,
 		   .of_match_table = mt8173_rt5650_rt5676_dt_match,
 #ifdef CONFIG_PM
 		   .pm = &snd_soc_pm_ops,
 #endif
 	},
 	.probe = mt8173_rt5650_rt5676_dev_probe,
-	.remove = mt8173_rt5650_rt5676_dev_remove,
 };
 
 module_platform_driver(mt8173_rt5650_rt5676_driver);

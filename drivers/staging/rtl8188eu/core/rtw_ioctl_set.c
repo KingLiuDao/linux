@@ -11,11 +11,6 @@
  * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
  * more details.
  *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110, USA
- *
- *
  ******************************************************************************/
 #define _RTW_IOCTL_SET_C_
 
@@ -26,13 +21,6 @@
 #include <hal_intf.h>
 
 extern void indicate_wx_scan_complete_event(struct adapter *padapter);
-
-#define IS_MAC_ADDRESS_BROADCAST(addr) \
-(\
-	((addr[0] == 0xff) && (addr[1] == 0xff) && \
-		(addr[2] == 0xff) && (addr[3] == 0xff) && \
-		(addr[4] == 0xff) && (addr[5] == 0xff))  ? true : false \
-)
 
 u8 rtw_do_join(struct adapter *padapter)
 {
@@ -183,7 +171,7 @@ u8 rtw_set_802_11_bssid(struct adapter *padapter, u8 *bssid)
 			if (check_fwstate(pmlmepriv, _FW_LINKED) == true)
 				rtw_indicate_disconnect(padapter);
 
-			rtw_free_assoc_resources(padapter, 1);
+			rtw_free_assoc_resources(padapter);
 
 			if ((check_fwstate(pmlmepriv, WIFI_ADHOC_MASTER_STATE) == true)) {
 				_clr_fwstate_(pmlmepriv, WIFI_ADHOC_MASTER_STATE);
@@ -271,7 +259,7 @@ u8 rtw_set_802_11_ssid(struct adapter *padapter, struct ndis_802_11_ssid *ssid)
 					if (check_fwstate(pmlmepriv, _FW_LINKED) == true)
 						rtw_indicate_disconnect(padapter);
 
-					rtw_free_assoc_resources(padapter, 1);
+					rtw_free_assoc_resources(padapter);
 
 					if (check_fwstate(pmlmepriv, WIFI_ADHOC_MASTER_STATE) == true) {
 						_clr_fwstate_(pmlmepriv, WIFI_ADHOC_MASTER_STATE);
@@ -293,7 +281,7 @@ u8 rtw_set_802_11_ssid(struct adapter *padapter, struct ndis_802_11_ssid *ssid)
 			if (check_fwstate(pmlmepriv, _FW_LINKED) == true)
 				rtw_indicate_disconnect(padapter);
 
-			rtw_free_assoc_resources(padapter, 1);
+			rtw_free_assoc_resources(padapter);
 
 			if (check_fwstate(pmlmepriv, WIFI_ADHOC_MASTER_STATE) == true) {
 				_clr_fwstate_(pmlmepriv, WIFI_ADHOC_MASTER_STATE);
@@ -366,7 +354,7 @@ u8 rtw_set_802_11_infrastructure_mode(struct adapter *padapter,
 
 		if ((check_fwstate(pmlmepriv, _FW_LINKED)) ||
 		    (check_fwstate(pmlmepriv, WIFI_ADHOC_MASTER_STATE)))
-			rtw_free_assoc_resources(padapter, 1);
+			rtw_free_assoc_resources(padapter);
 
 		if ((*pold_state == Ndis802_11Infrastructure) || (*pold_state == Ndis802_11IBSS)) {
 			if (check_fwstate(pmlmepriv, _FW_LINKED) == true)
@@ -415,7 +403,7 @@ u8 rtw_set_802_11_disassociate(struct adapter *padapter)
 
 		rtw_disassoc_cmd(padapter, 0, true);
 		rtw_indicate_disconnect(padapter);
-		rtw_free_assoc_resources(padapter, 1);
+		rtw_free_assoc_resources(padapter);
 		rtw_pwr_wakeup(padapter);
 	}
 

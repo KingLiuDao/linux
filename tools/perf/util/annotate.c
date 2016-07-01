@@ -65,6 +65,11 @@ static int call__parse(struct ins_operands *ops)
 
 	name++;
 
+#ifdef __arm__
+	if (strchr(name, '+'))
+		return -1;
+#endif
+
 	tok = strchr(name, '>');
 	if (tok == NULL)
 		return -1;
@@ -246,7 +251,11 @@ static int mov__parse(struct ins_operands *ops)
 		return -1;
 
 	target = ++s;
+#ifdef __arm__
+	comment = strchr(s, ';');
+#else
 	comment = strchr(s, '#');
+#endif
 
 	if (comment != NULL)
 		s = comment - 1;
@@ -345,15 +354,26 @@ static struct ins_ops nop_ops = {
 	.scnprintf = nop__scnprintf,
 };
 
-/*
- * Must be sorted by name!
- */
 static struct ins instructions[] = {
 	{ .name = "add",   .ops  = &mov_ops, },
 	{ .name = "addl",  .ops  = &mov_ops, },
 	{ .name = "addq",  .ops  = &mov_ops, },
 	{ .name = "addw",  .ops  = &mov_ops, },
 	{ .name = "and",   .ops  = &mov_ops, },
+#ifdef __arm__
+	{ .name = "b",     .ops  = &jump_ops, }, // might also be a call
+	{ .name = "bcc",   .ops  = &jump_ops, },
+	{ .name = "bcs",   .ops  = &jump_ops, },
+	{ .name = "beq",   .ops  = &jump_ops, },
+	{ .name = "bge",   .ops  = &jump_ops, },
+	{ .name = "bgt",   .ops  = &jump_ops, },
+	{ .name = "bhi",   .ops  = &jump_ops, },
+	{ .name = "bl",    .ops  = &call_ops, },
+	{ .name = "bls",   .ops  = &jump_ops, },
+	{ .name = "blt",   .ops  = &jump_ops, },
+	{ .name = "blx",   .ops  = &call_ops, },
+	{ .name = "bne",   .ops  = &jump_ops, },
+#endif
 	{ .name = "bts",   .ops  = &mov_ops, },
 	{ .name = "call",  .ops  = &call_ops, },
 	{ .name = "callq", .ops  = &call_ops, },
@@ -426,18 +446,39 @@ static struct ins instructions[] = {
 	{ .name = "xbeginq", .ops  = &jump_ops, },
 };
 
-static int ins__cmp(const void *name, const void *insp)
+static int ins__key_cmp(const void *name, const void *insp)
 {
 	const struct ins *ins = insp;
 
 	return strcmp(name, ins->name);
 }
 
-static struct ins *ins__find(const char *name)
+static int ins__cmp(const void *a, const void *b)
+{
+	const struct ins *ia = a;
+	const struct ins *ib = b;
+
+	return strcmp(ia->name, ib->name);
+}
+
+static void ins__sort(void)
 {
 	const int nmemb = ARRAY_SIZE(instructions);
 
-	return bsearch(name, instructions, nmemb, sizeof(struct ins), ins__cmp);
+	qsort(instructions, nmemb, sizeof(struct ins), ins__cmp);
+}
+
+static struct ins *ins__find(const char *name)
+{
+	const int nmemb = ARRAY_SIZE(instructions);
+	static bool sorted;
+
+	if (!sorted) {
+		ins__sort();
+		sorted = true;
+	}
+
+	return bsearch(name, instructions, nmemb, sizeof(struct ins), ins__key_cmp);
 }
 
 int symbol__annotate_init(struct map *map __maybe_unused, struct symbol *sym)
@@ -473,15 +514,71 @@ int symbol__alloc_hist(struct symbol *sym)
 	return 0;
 }
 
+/* The cycles histogram is lazily allocated. */
+static int symbol__alloc_hist_cycles(struct symbol *sym)
+{
+	struct annotation *notes = symbol__annotation(sym);
+	const size_t size = symbol__size(sym);
+
+	notes->src->cycles_hist = calloc(size, sizeof(struct cyc_hist));
+	if (notes->src->cycles_hist == NULL)
+		return -1;
+	return 0;
+}
+
 void symbol__annotate_zero_histograms(struct symbol *sym)
 {
 	struct annotation *notes = symbol__annotation(sym);
 
 	pthread_mutex_lock(&notes->lock);
-	if (notes->src != NULL)
+	if (notes->src != NULL) {
 		memset(notes->src->histograms, 0,
 		       notes->src->nr_histograms * notes->src->sizeof_sym_hist);
+		if (notes->src->cycles_hist)
+			memset(notes->src->cycles_hist, 0,
+				symbol__size(sym) * sizeof(struct cyc_hist));
+	}
 	pthread_mutex_unlock(&notes->lock);
+}
+
+static int __symbol__account_cycles(struct annotation *notes,
+				    u64 start,
+				    unsigned offset, unsigned cycles,
+				    unsigned have_start)
+{
+	struct cyc_hist *ch;
+
+	ch = notes->src->cycles_hist;
+	/*
+	 * For now we can only account one basic block per
+	 * final jump. But multiple could be overlapping.
+	 * Always account the longest one. So when
+	 * a shorter one has been already seen throw it away.
+	 *
+	 * We separately always account the full cycles.
+	 */
+	ch[offset].num_aggr++;
+	ch[offset].cycles_aggr += cycles;
+
+	if (!have_start && ch[offset].have_start)
+		return 0;
+	if (ch[offset].num) {
+		if (have_start && (!ch[offset].have_start ||
+				   ch[offset].start > start)) {
+			ch[offset].have_start = 0;
+			ch[offset].cycles = 0;
+			ch[offset].num = 0;
+			if (ch[offset].reset < 0xffff)
+				ch[offset].reset++;
+		} else if (have_start &&
+			   ch[offset].start < start)
+			return 0;
+	}
+	ch[offset].have_start = have_start;
+	ch[offset].start = start;
+	ch[offset].cycles += cycles;
+	ch[offset].num++;
+	return 0;
 }
 
 static int __symbol__inc_addr_samples(struct symbol *sym, struct map *map,
@@ -492,8 +589,11 @@ static int __symbol__inc_addr_samples(struct symbol *sym, struct map *map,
 
 	pr_debug3("%s: addr=%#" PRIx64 "\n", __func__, map->unmap_ip(map, addr));
 
-	if (addr < sym->start || addr >= sym->end)
+	if (addr < sym->start || addr >= sym->end) {
+		pr_debug("%s(%d): ERANGE! sym->name=%s, start=%#" PRIx64 ", addr=%#" PRIx64 ", end=%#" PRIx64 "\n",
+		       __func__, __LINE__, sym->name, sym->start, addr, sym->end);
 		return -ERANGE;
+	}
 
 	offset = addr - sym->start;
 	h = annotation__histogram(notes, evidx);
@@ -506,12 +606,16 @@ static int __symbol__inc_addr_samples(struct symbol *sym, struct map *map,
 	return 0;
 }
 
-static struct annotation *symbol__get_annotation(struct symbol *sym)
+static struct annotation *symbol__get_annotation(struct symbol *sym, bool cycles)
 {
 	struct annotation *notes = symbol__annotation(sym);
 
 	if (notes->src == NULL) {
 		if (symbol__alloc_hist(sym) < 0)
+			return NULL;
+	}
+	if (!notes->src->cycles_hist && cycles) {
+		if (symbol__alloc_hist_cycles(sym) < 0)
 			return NULL;
 	}
 	return notes;
@@ -524,10 +628,71 @@ static int symbol__inc_addr_samples(struct symbol *sym, struct map *map,
 
 	if (sym == NULL)
 		return 0;
-	notes = symbol__get_annotation(sym);
+	notes = symbol__get_annotation(sym, false);
 	if (notes == NULL)
 		return -ENOMEM;
 	return __symbol__inc_addr_samples(sym, map, notes, evidx, addr);
+}
+
+static int symbol__account_cycles(u64 addr, u64 start,
+				  struct symbol *sym, unsigned cycles)
+{
+	struct annotation *notes;
+	unsigned offset;
+
+	if (sym == NULL)
+		return 0;
+	notes = symbol__get_annotation(sym, true);
+	if (notes == NULL)
+		return -ENOMEM;
+	if (addr < sym->start || addr >= sym->end)
+		return -ERANGE;
+
+	if (start) {
+		if (start < sym->start || start >= sym->end)
+			return -ERANGE;
+		if (start >= addr)
+			start = 0;
+	}
+	offset = addr - sym->start;
+	return __symbol__account_cycles(notes,
+					start ? start - sym->start : 0,
+					offset, cycles,
+					!!start);
+}
+
+int addr_map_symbol__account_cycles(struct addr_map_symbol *ams,
+				    struct addr_map_symbol *start,
+				    unsigned cycles)
+{
+	u64 saddr = 0;
+	int err;
+
+	if (!cycles)
+		return 0;
+
+	/*
+	 * Only set start when IPC can be computed. We can only
+	 * compute it when the basic block is completely in a single
+	 * function.
+	 * Special case the case when the jump is elsewhere, but
+	 * it starts on the function start.
+	 */
+	if (start &&
+		(start->sym == ams->sym ||
+		 (ams->sym &&
+		   start->addr == ams->sym->start + ams->map->start)))
+		saddr = start->al_addr;
+	if (saddr == 0)
+		pr_debug2("BB with bad start: addr %"PRIx64" start %"PRIx64" sym %"PRIx64" saddr %"PRIx64"\n",
+			ams->addr,
+			start ? start->addr : 0,
+			ams->sym ? ams->sym->start + ams->map->start : 0,
+			saddr);
+	err = symbol__account_cycles(ams->al_addr, saddr, ams->sym, cycles);
+	if (err)
+		pr_debug2("account_cycles failed %d\n", err);
+	return err;
 }
 
 int addr_map_symbol__inc_samples(struct addr_map_symbol *ams, int evidx)
@@ -960,6 +1125,7 @@ int symbol__annotate(struct symbol *sym, struct map *map, size_t privsize)
 	struct kcore_extract kce;
 	bool delete_extract = false;
 	int lineno = 0;
+	int nline;
 
 	if (filename)
 		symbol__join_symfs(symfs_filename, filename);
@@ -974,7 +1140,7 @@ int symbol__annotate(struct symbol *sym, struct map *map, size_t privsize)
 	} else if (dso__is_kcore(dso)) {
 		goto fallback;
 	} else if (readlink(symfs_filename, command, sizeof(command)) < 0 ||
-		   strstr(command, "[kernel.kallsyms]") ||
+		   strstr(command, DSO__NAME_KALLSYMS) ||
 		   access(symfs_filename, R_OK)) {
 		free(filename);
 fallback:
@@ -990,7 +1156,7 @@ fallback:
 
 	if (dso->symtab_type == DSO_BINARY_TYPE__KALLSYMS &&
 	    !dso__is_kcore(dso)) {
-		char bf[BUILD_ID_SIZE * 2 + 16] = " with build id ";
+		char bf[SBUILD_ID_SIZE + 15] = " with build id ";
 		char *build_id_msg = NULL;
 
 		if (dso->annotate_warned)
@@ -1005,6 +1171,7 @@ fallback:
 		dso->annotate_warned = 1;
 		pr_err("Can't annotate %s:\n\n"
 		       "No vmlinux file%s\nwas found in the path.\n\n"
+		       "Note that annotation using /proc/kcore requires CAP_SYS_RAWIO capability.\n\n"
 		       "Please use:\n\n"
 		       "  perf buildid-cache -vu vmlinux\n\n"
 		       "or:\n\n"
@@ -1054,6 +1221,9 @@ fallback:
 
 		ret = decompress_to_file(m.ext, symfs_filename, fd);
 
+		if (ret)
+			pr_err("Cannot decompress %s %s\n", m.ext, symfs_filename);
+
 		free(m.ext);
 		close(fd);
 
@@ -1079,13 +1249,25 @@ fallback:
 	pr_debug("Executing: %s\n", command);
 
 	file = popen(command, "r");
-	if (!file)
+	if (!file) {
+		pr_err("Failure running %s\n", command);
+		/*
+		 * If we were using debug info should retry with
+		 * original binary.
+		 */
 		goto out_remove_tmp;
+	}
 
-	while (!feof(file))
+	nline = 0;
+	while (!feof(file)) {
 		if (symbol__parse_objdump_line(sym, map, file, privsize,
 			    &lineno) < 0)
 			break;
+		nline++;
+	}
+
+	if (nline == 0)
+		pr_err("No output from %s\n", command);
 
 	/*
 	 * kallsyms does not have symbol sizes so there may a nop at the end.
@@ -1479,6 +1661,7 @@ int symbol__tty_annotate(struct symbol *sym, struct map *map,
 	len = symbol__size(sym);
 
 	if (print_lines) {
+		srcline_full_filename = full_paths;
 		symbol__get_source_line(sym, map, evsel, &source_line, len);
 		print_summary(&source_line, dso->long_name);
 	}
@@ -1500,5 +1683,5 @@ int hist_entry__annotate(struct hist_entry *he, size_t privsize)
 
 bool ui__has_annotation(void)
 {
-	return use_browser == 1 && sort__has_sym;
+	return use_browser == 1 && perf_hpp_list.sym;
 }

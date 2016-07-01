@@ -183,7 +183,7 @@ struct rcar_dmac {
 	unsigned int n_channels;
 	struct rcar_dmac_chan *channels;
 
-	unsigned long modules[256 / BITS_PER_LONG];
+	DECLARE_BITMAP(modules, 256);
 };
 
 #define to_rcar_dmac(d)		container_of(d, struct rcar_dmac, engine)
@@ -413,7 +413,7 @@ static int rcar_dmac_init(struct rcar_dmac *dmac)
 	u16 dmaor;
 
 	/* Clear all channels and enable the DMAC globally. */
-	rcar_dmac_write(dmac, RCAR_DMACHCLR, 0x7fff);
+	rcar_dmac_write(dmac, RCAR_DMACHCLR, GENMASK(dmac->n_channels - 1, 0));
 	rcar_dmac_write(dmac, RCAR_DMAOR,
 			RCAR_DMAOR_PRI_FIXED | RCAR_DMAOR_DME);
 

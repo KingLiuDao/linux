@@ -3,6 +3,7 @@
 #include "debug.h"
 #include <api/fs/fs.h>
 #include <sys/mman.h>
+#include <sys/utsname.h>
 #ifdef HAVE_BACKTRACE_SUPPORT
 #include <execinfo.h>
 #endif
@@ -13,14 +14,17 @@
 #include <limits.h>
 #include <byteswap.h>
 #include <linux/kernel.h>
+#include <linux/log2.h>
 #include <unistd.h>
 #include "callchain.h"
+#include "strlist.h"
 
 struct callchain_param	callchain_param = {
-	.mode	= CHAIN_GRAPH_REL,
+	.mode	= CHAIN_GRAPH_ABS,
 	.min_percent = 0.5,
 	.order  = ORDER_CALLEE,
-	.key	= CCKEY_FUNCTION
+	.key	= CCKEY_FUNCTION,
+	.value	= CCVAL_PERCENT,
 };
 
 /*
@@ -29,12 +33,13 @@ struct callchain_param	callchain_param = {
 unsigned int page_size;
 int cacheline_size;
 
+int sysctl_perf_event_max_stack = PERF_MAX_STACK_DEPTH;
+int sysctl_perf_event_max_contexts_per_stack = PERF_MAX_CONTEXTS_PER_STACK;
+
 bool test_attr__enabled;
 
 bool perf_host  = true;
 bool perf_guest = false;
-
-char tracing_events_path[PATH_MAX + 1] = "/sys/kernel/debug/tracing/events";
 
 void event_attr_init(struct perf_event_attr *attr)
 {
@@ -113,6 +118,40 @@ int rm_rf(char *path)
 		return ret;
 
 	return rmdir(path);
+}
+
+/* A filter which removes dot files */
+bool lsdir_no_dot_filter(const char *name __maybe_unused, struct dirent *d)
+{
+	return d->d_name[0] != '.';
+}
+
+/* lsdir reads a directory and store it in strlist */
+struct strlist *lsdir(const char *name,
+		      bool (*filter)(const char *, struct dirent *))
+{
+	struct strlist *list = NULL;
+	DIR *dir;
+	struct dirent *d;
+
+	dir = opendir(name);
+	if (!dir)
+		return NULL;
+
+	list = strlist__new(NULL, NULL);
+	if (!list) {
+		errno = ENOMEM;
+		goto out;
+	}
+
+	while ((d = readdir(dir)) != NULL) {
+		if (!filter || filter(name, d))
+			strlist__add(list, d->d_name);
+	}
+
+out:
+	closedir(dir);
+	return list;
 }
 
 static int slow_copyfile(const char *from, const char *to)
@@ -352,158 +391,8 @@ void sighandler_dump_stack(int sig)
 {
 	psignal(sig, "perf");
 	dump_stack();
-	exit(sig);
-}
-
-void get_term_dimensions(struct winsize *ws)
-{
-	char *s = getenv("LINES");
-
-	if (s != NULL) {
-		ws->ws_row = atoi(s);
-		s = getenv("COLUMNS");
-		if (s != NULL) {
-			ws->ws_col = atoi(s);
-			if (ws->ws_row && ws->ws_col)
-				return;
-		}
-	}
-#ifdef TIOCGWINSZ
-	if (ioctl(1, TIOCGWINSZ, ws) == 0 &&
-	    ws->ws_row && ws->ws_col)
-		return;
-#endif
-	ws->ws_row = 25;
-	ws->ws_col = 80;
-}
-
-void set_term_quiet_input(struct termios *old)
-{
-	struct termios tc;
-
-	tcgetattr(0, old);
-	tc = *old;
-	tc.c_lflag &= ~(ICANON | ECHO);
-	tc.c_cc[VMIN] = 0;
-	tc.c_cc[VTIME] = 0;
-	tcsetattr(0, TCSANOW, &tc);
-}
-
-static void set_tracing_events_path(const char *tracing, const char *mountpoint)
-{
-	snprintf(tracing_events_path, sizeof(tracing_events_path), "%s/%s%s",
-		 mountpoint, tracing, "events");
-}
-
-static const char *__perf_tracefs_mount(const char *mountpoint)
-{
-	const char *mnt;
-
-	mnt = tracefs_mount(mountpoint);
-	if (!mnt)
-		return NULL;
-
-	set_tracing_events_path("", mnt);
-
-	return mnt;
-}
-
-static const char *__perf_debugfs_mount(const char *mountpoint)
-{
-	const char *mnt;
-
-	mnt = debugfs_mount(mountpoint);
-	if (!mnt)
-		return NULL;
-
-	set_tracing_events_path("tracing/", mnt);
-
-	return mnt;
-}
-
-const char *perf_debugfs_mount(const char *mountpoint)
-{
-	const char *mnt;
-
-	mnt = __perf_tracefs_mount(mountpoint);
-	if (mnt)
-		return mnt;
-
-	mnt = __perf_debugfs_mount(mountpoint);
-
-	return mnt;
-}
-
-void perf_debugfs_set_path(const char *mntpt)
-{
-	snprintf(debugfs_mountpoint, strlen(debugfs_mountpoint), "%s", mntpt);
-	set_tracing_events_path("tracing/", mntpt);
-}
-
-static const char *find_tracefs(void)
-{
-	const char *path = __perf_tracefs_mount(NULL);
-
-	return path;
-}
-
-static const char *find_debugfs(void)
-{
-	const char *path = __perf_debugfs_mount(NULL);
-
-	if (!path)
-		fprintf(stderr, "Your kernel does not support the debugfs filesystem");
-
-	return path;
-}
-
-/*
- * Finds the path to the debugfs/tracing
- * Allocates the string and stores it.
- */
-const char *find_tracing_dir(void)
-{
-	const char *tracing_dir = "";
-	static char *tracing;
-	static int tracing_found;
-	const char *debugfs;
-
-	if (tracing_found)
-		return tracing;
-
-	debugfs = find_tracefs();
-	if (!debugfs) {
-		tracing_dir = "/tracing";
-		debugfs = find_debugfs();
-		if (!debugfs)
-			return NULL;
-	}
-
-	if (asprintf(&tracing, "%s%s", debugfs, tracing_dir) < 0)
-		return NULL;
-
-	tracing_found = 1;
-	return tracing;
-}
-
-char *get_tracing_file(const char *name)
-{
-	const char *tracing;
-	char *file;
-
-	tracing = find_tracing_dir();
-	if (!tracing)
-		return NULL;
-
-	if (asprintf(&file, "%s/%s", tracing, name) < 0)
-		return NULL;
-
-	return file;
-}
-
-void put_tracing_file(char *file)
-{
-	free(file);
+	signal(sig, SIG_DFL);
+	raise(sig);
 }
 
 int parse_nsec_time(const char *str, u64 *ptime)
@@ -566,52 +455,92 @@ unsigned long parse_tag_value(const char *str, struct parse_tag *tags)
 	return (unsigned long) -1;
 }
 
-int filename__read_str(const char *filename, char **buf, size_t *sizep)
+int get_stack_size(const char *str, unsigned long *_size)
 {
-	size_t size = 0, alloc_size = 0;
-	void *bf = NULL, *nbf;
-	int fd, n, err = 0;
-	char sbuf[STRERR_BUFSIZE];
+	char *endptr;
+	unsigned long size;
+	unsigned long max_size = round_down(USHRT_MAX, sizeof(u64));
 
-	fd = open(filename, O_RDONLY);
-	if (fd < 0)
-		return -errno;
+	size = strtoul(str, &endptr, 0);
 
 	do {
-		if (size == alloc_size) {
-			alloc_size += BUFSIZ;
-			nbf = realloc(bf, alloc_size);
-			if (!nbf) {
-				err = -ENOMEM;
-				break;
-			}
+		if (*endptr)
+			break;
 
-			bf = nbf;
-		}
+		size = round_up(size, sizeof(u64));
+		if (!size || size > max_size)
+			break;
 
-		n = read(fd, bf + size, alloc_size - size);
-		if (n < 0) {
-			if (size) {
-				pr_warning("read failed %d: %s\n", errno,
-					 strerror_r(errno, sbuf, sizeof(sbuf)));
-				err = 0;
+		*_size = size;
+		return 0;
+
+	} while (0);
+
+	pr_err("callchain: Incorrect stack dump size (max %ld): %s\n",
+	       max_size, str);
+	return -1;
+}
+
+int parse_callchain_record(const char *arg, struct callchain_param *param)
+{
+	char *tok, *name, *saveptr = NULL;
+	char *buf;
+	int ret = -1;
+
+	/* We need buffer that we know we can write to. */
+	buf = malloc(strlen(arg) + 1);
+	if (!buf)
+		return -ENOMEM;
+
+	strcpy(buf, arg);
+
+	tok = strtok_r((char *)buf, ",", &saveptr);
+	name = tok ? : (char *)buf;
+
+	do {
+		/* Framepointer style */
+		if (!strncmp(name, "fp", sizeof("fp"))) {
+			if (!strtok_r(NULL, ",", &saveptr)) {
+				param->record_mode = CALLCHAIN_FP;
+				ret = 0;
 			} else
-				err = -errno;
+				pr_err("callchain: No more arguments "
+				       "needed for --call-graph fp\n");
+			break;
 
+		/* Dwarf style */
+		} else if (!strncmp(name, "dwarf", sizeof("dwarf"))) {
+			const unsigned long default_stack_dump_size = 8192;
+
+			ret = 0;
+			param->record_mode = CALLCHAIN_DWARF;
+			param->dump_size = default_stack_dump_size;
+
+			tok = strtok_r(NULL, ",", &saveptr);
+			if (tok) {
+				unsigned long size = 0;
+
+				ret = get_stack_size(tok, &size);
+				param->dump_size = size;
+			}
+		} else if (!strncmp(name, "lbr", sizeof("lbr"))) {
+			if (!strtok_r(NULL, ",", &saveptr)) {
+				param->record_mode = CALLCHAIN_LBR;
+				ret = 0;
+			} else
+				pr_err("callchain: No more arguments "
+					"needed for --call-graph lbr\n");
+			break;
+		} else {
+			pr_err("callchain: Unknown --call-graph option "
+			       "value: %s\n", arg);
 			break;
 		}
 
-		size += n;
-	} while (n > 0);
+	} while (0);
 
-	if (!err) {
-		*sizep = size;
-		*buf   = bf;
-	} else
-		free(bf);
-
-	close(fd);
-	return err;
+	free(buf);
+	return ret;
 }
 
 const char *get_filename_for_perf_kvm(void)
@@ -668,7 +597,7 @@ bool find_process(const char *name)
 
 	dir = opendir(procfs__mountpoint());
 	if (!dir)
-		return -1;
+		return false;
 
 	/* Walk through the directory. */
 	while (ret && (d = readdir(dir)) != NULL) {
@@ -693,4 +622,123 @@ bool find_process(const char *name)
 
 	closedir(dir);
 	return ret ? false : true;
+}
+
+int
+fetch_kernel_version(unsigned int *puint, char *str,
+		     size_t str_size)
+{
+	struct utsname utsname;
+	int version, patchlevel, sublevel, err;
+
+	if (uname(&utsname))
+		return -1;
+
+	if (str && str_size) {
+		strncpy(str, utsname.release, str_size);
+		str[str_size - 1] = '\0';
+	}
+
+	err = sscanf(utsname.release, "%d.%d.%d",
+		     &version, &patchlevel, &sublevel);
+
+	if (err != 3) {
+		pr_debug("Unablt to get kernel version from uname '%s'\n",
+			 utsname.release);
+		return -1;
+	}
+
+	if (puint)
+		*puint = (version << 16) + (patchlevel << 8) + sublevel;
+	return 0;
+}
+
+const char *perf_tip(const char *dirpath)
+{
+	struct strlist *tips;
+	struct str_node *node;
+	char *tip = NULL;
+	struct strlist_config conf = {
+		.dirname = dirpath,
+		.file_only = true,
+	};
+
+	tips = strlist__new("tips.txt", &conf);
+	if (tips == NULL)
+		return errno == ENOENT ? NULL : "Tip: get more memory! ;-p";
+
+	if (strlist__nr_entries(tips) == 0)
+		goto out;
+
+	node = strlist__entry(tips, random() % strlist__nr_entries(tips));
+	if (asprintf(&tip, "Tip: %s", node->s) < 0)
+		tip = (char *)"Tip: get more memory! ;-)";
+
+out:
+	strlist__delete(tips);
+
+	return tip;
+}
+
+bool is_regular_file(const char *file)
+{
+	struct stat st;
+
+	if (stat(file, &st))
+		return false;
+
+	return S_ISREG(st.st_mode);
+}
+
+int fetch_current_timestamp(char *buf, size_t sz)
+{
+	struct timeval tv;
+	struct tm tm;
+	char dt[32];
+
+	if (gettimeofday(&tv, NULL) || !localtime_r(&tv.tv_sec, &tm))
+		return -1;
+
+	if (!strftime(dt, sizeof(dt), "%Y%m%d%H%M%S", &tm))
+		return -1;
+
+	scnprintf(buf, sz, "%s%02u", dt, (unsigned)tv.tv_usec / 10000);
+
+	return 0;
+}
+
+void print_binary(unsigned char *data, size_t len,
+		  size_t bytes_per_line, print_binary_t printer,
+		  void *extra)
+{
+	size_t i, j, mask;
+
+	if (!printer)
+		return;
+
+	bytes_per_line = roundup_pow_of_two(bytes_per_line);
+	mask = bytes_per_line - 1;
+
+	printer(BINARY_PRINT_DATA_BEGIN, 0, extra);
+	for (i = 0; i < len; i++) {
+		if ((i & mask) == 0) {
+			printer(BINARY_PRINT_LINE_BEGIN, -1, extra);
+			printer(BINARY_PRINT_ADDR, i, extra);
+		}
+
+		printer(BINARY_PRINT_NUM_DATA, data[i], extra);
+
+		if (((i & mask) == mask) || i == len - 1) {
+			for (j = 0; j < mask-(i & mask); j++)
+				printer(BINARY_PRINT_NUM_PAD, -1, extra);
+
+			printer(BINARY_PRINT_SEP, i, extra);
+			for (j = i & ~mask; j <= i; j++)
+				printer(BINARY_PRINT_CHAR_DATA, data[j], extra);
+			for (j = 0; j < mask-(i & mask); j++)
+				printer(BINARY_PRINT_CHAR_PAD, i, extra);
+			printer(BINARY_PRINT_LINE_END, -1, extra);
+		}
+	}
+	printer(BINARY_PRINT_DATA_END, -1, extra);
 }
